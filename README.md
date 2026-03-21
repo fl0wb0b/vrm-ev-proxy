@@ -2,18 +2,18 @@
 
 Connects your EV from **Victron VRM** to your local **EVCC** instance.
 
-Your Victron Cerbo GX already reads the EV and syncs the data to VRM. This proxy fetches that data and makes it available to EVCC as a local vehicle endpoint – with a built-in status page and settings UI.
+VRM integrates with the EV manufacturer's API and makes vehicle data available in the VRM Cloud. This proxy fetches that data every 60 seconds and serves it locally to EVCC – with a built-in status page and settings UI.
 
 ```
-Cerbo GX  ◄──►  EV
-    │
-    ▼
-VRM Cloud API
-    ▲
-    │  polls every 60s
-vrm-ev-proxy  ──►  EVCC
-    │
-    └──  http://<your-server>:8080
+EV Manufacturer API
+        │
+        ▼
+  VRM Cloud API
+        ▲
+        │  polls every 60s
+  vrm-ev-proxy  ──►  EVCC
+        │
+        └──  http://<your-server>:8080
 ```
 
 ---
