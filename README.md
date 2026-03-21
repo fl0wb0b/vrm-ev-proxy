@@ -28,7 +28,7 @@ cd vrm-ev-proxy
 docker compose up -d
 ```
 
-Then open **`http://<your-server-ip>:8080/settings`** in your browser and enter your VRM credentials. That's it.
+Then open **`http://<your-server-ip>:8080`** in your browser – the setup wizard guides you through the rest. That's it.
 
 ---
 
