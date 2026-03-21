@@ -55,7 +55,8 @@ Everything is configured in the browser at `/settings` – no config files, no t
 
 ## EVCC setup
 
-Add a vehicle in EVCC pointing to this proxy:
+Add a vehicle in EVCC with these settings:
+- **Template:** Tesla BLE HTTP Proxy
 - **URL:** `http://<server-ip>:8080`
 - **VIN:** your vehicle VIN
 
