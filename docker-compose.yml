@@ -1,0 +1,23 @@
+services:
+  vrm-ev-proxy:
+    build: .
+    container_name: vrm-ev-proxy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - config:/config          # persists settings changed via web UI
+    environment:
+      - VRM_TOKEN=${VRM_TOKEN}
+      - VRM_SITE_ID=${VRM_SITE_ID}
+      - POLL_INTERVAL=${POLL_INTERVAL:-60}
+      - PORT=${PORT:-8080}
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  config:
