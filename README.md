@@ -25,7 +25,7 @@ EV Manufacturer API
 ```bash
 git clone https://github.com/fl0wb0b/vrm-ev-proxy.git
 cd vrm-ev-proxy
-docker compose up -d
+sudo docker compose up -d
 ```
 
 Then open **`http://<your-server-ip>:8080`** in your browser – the setup wizard guides you through the rest. That's it.
