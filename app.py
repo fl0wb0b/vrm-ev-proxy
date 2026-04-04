@@ -45,7 +45,9 @@ _cache = {
     'error': None,
     'error_count': 0,
     'next_retry_in': 0,
+    'sticky_vins': {},  # inst -> {'vin': str, 'ts': float}
 }
+STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
 _lock  = threading.Lock()
 _start = time.time()
 
@@ -108,7 +110,9 @@ def poll_vrm():
 
             for inst, ev in by_instance.items():
                 # Extract VIN
-                vin = str(ev.get('/Serial') or ev.get('/VIN') or f'EV_{inst}')
+                raw_vin = str(ev.get('/Serial') or ev.get('/VIN') or '')
+                fallback = f'EV_{inst}'
+                vin = raw_vin or fallback
                 custom_name = str(ev.get('/CustomName') or '') or vin
 
                 charging_raw  = int(float(ev.get('/ChargingState', 0)))
@@ -121,6 +125,20 @@ def poll_vrm():
                 odometer      = float(ev.get('/Odometer', 0))
                 charging_state = CHARGING_STATE_MAP.get(charging_raw, 'Disconnected')
 
+                # ── Sticky VIN: hold last known real VIN while VRM catches up ──
+                now_t = time.time()
+                with _lock:
+                    sticky = _cache['sticky_vins'].get(inst, {})
+                if raw_vin and charging_state != 'Disconnected':
+                    # Real VIN seen while actively connected – refresh sticky record
+                    with _lock:
+                        _cache['sticky_vins'][inst] = {'vin': raw_vin, 'ts': now_t}
+                elif charging_state != 'Disconnected' and sticky.get('vin') and \
+                        (now_t - sticky.get('ts', 0)) < STICKY_VIN_GRACE:
+                    # No VIN yet but vehicle connected – use last known real VIN
+                    vin = sticky['vin']
+                    print(f'[VRM] Sticky VIN for inst={inst}: using {vin} during identification grace period.', flush=True)
+
                 data = {
                     'battery_level':    soc,
                     'battery_range':    round(range_km / 1.60934, 2),
@@ -131,7 +149,7 @@ def poll_vrm():
 
                 # ── Track last full charge (per VIN) ──────────────────────────
                 lfc_key = f'last_full_charge_{vin}'
-                if soc >= 100 and charging_state in ('Charging', 'Complete'):
+                if soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped'):
                     cfg[lfc_key] = time.time()
                     print(f'[VRM] Full charge detected for {vin} – timestamp saved.', flush=True)
 
@@ -759,7 +777,7 @@ def build_settings_page(saved=False, error_msg=''):
 
         <div class="section-title">Polling</div>
         <label>Poll Interval (seconds)</label>
-        <input type="number" name="POLL_INTERVAL" value="{interval}" min="10" max="300">
+        <input type="number" name="POLL_INTERVAL" value="{interval}" min="10" max="3600">
 
         <label>HTTP Port</label>
         <input type="number" name="PORT" value="{port}" min="1" max="65535">
@@ -957,7 +975,34 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+def _backfill_last_full_charge():
+    """On startup: scan SoC history and set last_full_charge if a 100% entry exists
+    but no timestamp is recorded yet (or the history entry is more recent)."""
+    cfg = _load_cfg()
+    changed = False
+    for key, value in list(cfg.items()):
+        if not key.startswith('soc_history_'):
+            continue
+        vin = key[len('soc_history_'):]
+        lfc_key = f'last_full_charge_{vin}'
+        history = value  # list of [ts, soc]
+        # Find most recent 100% entry
+        full_entries = [ts for ts, soc in history if soc >= 100]
+        if not full_entries:
+            continue
+        best_ts = max(full_entries)
+        existing = cfg.get(lfc_key, 0)
+        if best_ts > existing:
+            cfg[lfc_key] = best_ts
+            print(f'[startup] Backfilled last_full_charge for {vin}: '
+                  f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(best_ts))}', flush=True)
+            changed = True
+    if changed:
+        _save_cfg(cfg)
+
+
 if __name__ == '__main__':
+    _backfill_last_full_charge()
     port = int(_get('PORT', '8080'))
     print(f'[{APP_NAME}] v{VERSION}  port={port}  '
           f'site={_get("VRM_SITE_ID","?")}  poll={_get("POLL_INTERVAL","60")}s', flush=True)
