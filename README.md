@@ -32,6 +32,17 @@ Then open **`http://<your-server-ip>:8080`** in your browser – the setup wizar
 
 ---
 
+## Update
+
+```bash
+cd vrm-ev-proxy
+sudo docker compose pull && sudo docker compose up -d
+```
+
+Or use [Watchtower](https://containrrr.dev/watchtower/) to update automatically – no commands needed.
+
+---
+
 ## Configuration
 
 Everything is configured in the browser at `/settings` – no config files, no terminal.

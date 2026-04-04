@@ -1,6 +1,6 @@
 services:
   vrm-ev-proxy:
-    build: .
+    image: ghcr.io/fl0wb0b/vrm-ev-proxy:latest
     container_name: vrm-ev-proxy
     restart: unless-stopped
     network_mode: host
