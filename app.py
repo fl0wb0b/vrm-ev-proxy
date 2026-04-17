@@ -92,7 +92,7 @@ def poll_vrm():
             with urlopen(req, timeout=30) as resp:
                 records = json.loads(resp.read())['records']
 
-            ev_records = [r for r in records if r.get('Device') == 'Electrical Vehicle']
+            ev_records = [r for r in records if r.get('Device') == 'Electric Vehicle']
 
             if not ev_records:
                 raise ValueError('No EV device found in VRM – is the Tesla configured in VRM?')
