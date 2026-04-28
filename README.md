@@ -2,7 +2,7 @@
 
 Connects your EV from **Victron VRM** to your local **EVCC** instance.
 
-VRM integrates with the EV manufacturer's API and makes vehicle data available in the VRM Cloud. This proxy fetches that data every 60 seconds and serves it locally to EVCC – with a built-in status page and settings UI.
+VRM integrates with the EV manufacturer's API and makes vehicle data available in the VRM Cloud. This proxy fetches that data periodically (default: 60s, configurable) and serves it locally to EVCC – with a built-in status page and settings UI.
 
 ```
 EV Manufacturer API
@@ -20,7 +20,7 @@ EV Manufacturer API
 
 ## Install
 
-**Requires:** Docker + Docker Compose
+**Requires:** Docker + Docker Compose · Supports `linux/amd64` and `linux/arm64` (Raspberry Pi)
 
 ```bash
 git clone https://github.com/fl0wb0b/vrm-ev-proxy.git
@@ -70,6 +70,8 @@ Add a vehicle in EVCC with these settings:
 - **Template:** Tesla BLE HTTP Proxy
 - **URL:** `http://<server-ip>:8080`
 - **VIN:** your vehicle VIN
+
+> **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
 ---
 
