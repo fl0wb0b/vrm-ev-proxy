@@ -933,7 +933,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def do_POST(self):
-        if urlparse(self.path).path == '/settings':
+        path = urlparse(self.path).path
+        if path == '/settings':
             length = int(self.headers.get('Content-Length', 0))
             params = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
             cfg    = _load_cfg()
@@ -949,6 +950,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(build_settings_page(saved=True))
             except Exception as exc:
                 self._html(build_settings_page(error_msg=str(exc)))
+        elif '/command/' in path:
+            # Drain request body
+            length = int(self.headers.get('Content-Length', 0))
+            if length:
+                self.rfile.read(length)
+            parts = path.split('/')
+            command = parts[-1] if parts else 'unknown'
+            vin = None
+            try:
+                vi_idx = parts.index('vehicles')
+                vin = parts[vi_idx + 1]
+            except (ValueError, IndexError):
+                pass
+            print(f'[CMD] {command} (VIN={vin}) – no-op, data served from VRM', flush=True)
+            self._json({'response': {'result': True, 'reason': '', 'vin': vin or '', 'command': command}})
         else:
             self.send_response(404); self.end_headers()
 
