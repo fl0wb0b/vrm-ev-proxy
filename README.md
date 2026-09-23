@@ -84,7 +84,9 @@ vehicles:
     capacity: 60
 ```
 
-The proxy serves all fields the template reads from `charge_state`: `battery_level`, `battery_range` (miles), `charge_limit_soc`, `charge_amps`, `charging_state`, `charge_energy_added` (kWh, integrated from VRM power per plug-in session) and `minutes_to_full_charge` (estimate, needs battery capacity in `/settings`).
+The proxy serves all fields the template reads from `charge_state`: `battery_level`, `battery_range` (miles), `charge_limit_soc`, `charge_amps`, `charging_state`, `charge_energy_added` (kWh per plug-in session – from the VRM energy meter `/Ac/Energy/Forward` if available, otherwise integrated from AC/DC power) and `minutes_to_full_charge` (estimate from battery capacity – `/settings` or VRM `/BatteryCapacity`).
+
+Known bugs and their status: [BUGS.md](BUGS.md)
 
 > **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
