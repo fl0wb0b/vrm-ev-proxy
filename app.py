@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.2
+vrm-ev-proxy v2.3
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -15,7 +15,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.2"
+VERSION    = "2.3"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -55,6 +55,33 @@ def _charging_state(ev):
     if at_site is not None and _num(at_site, 1) == 0:
         state = 'Disconnected'
     return code, state
+
+
+# ── EV charging station (com.victronenergy.evcharger) ──────────────────────────
+# The EV service often lacks power data (e.g. Tesla via VRM: /Ac/Power empty).
+# /Mgmt/Connection names the EVCS the EV is plugged into ('evcharger:40' or '40');
+# that station reports live power, session energy and status.
+EVCS_MARKER_PATHS = {'/Session/Energy', '/Session/Time', '/ChargingTime', '/StartStop', '/SetCurrent'}
+# /Status: 0 Disconnected, 1 Connected, 2 Charging, 3 Charged, 4-7 waiting, 8-14 errors, 21-24 transitions
+EVCS_STATUS_MAP = {0: 'Disconnected', 2: 'Charging', 3: 'Complete'}
+
+def _connection(ev):
+    return ev.get('/Mgmt/Connection') or ev.get('Mgmt/Connection') or ''
+
+def _find_evcs(records, connection):
+    """Return (device_name, {dbusPath: rawValue}) of the EVCS the EV is plugged into."""
+    inst = int(_num(str(connection).split(':')[-1], -1))
+    if inst < 0:
+        return None, {}
+    devices = {}
+    for r in records:
+        if (r.get('Device') != 'Electric Vehicle' and r.get('dbusPath')
+                and int(_num(r.get('instance'), -2)) == inst):
+            devices.setdefault(r.get('Device'), {})[r['dbusPath']] = r.get('rawValue')
+    for name, values in devices.items():
+        if EVCS_MARKER_PATHS & values.keys():
+            return name, values
+    return None, {}
 CHARGING_STATE_UI = {
     'Disconnected': ('🔌', 'Disconnected', '#6b7280'),
     'Stopped':      ('⏸',  'Connected',    '#f59e0b'),
@@ -133,6 +160,10 @@ def _bat():
 def _interval():
     return max(10, _get_int('POLL_INTERVAL', 60))
 
+def _stale_after():
+    """Seconds without a successful VRM poll after which cached data is refused."""
+    return max(1800, 10 * _interval())
+
 def _is_configured():
     """Return True if both VRM_TOKEN and VRM_SITE_ID are set."""
     return bool(_get('VRM_TOKEN')) and bool(_get('VRM_SITE_ID'))
@@ -188,13 +219,22 @@ def poll_vrm():
                     custom_name = str(ev.get('/CustomName') or '') or brand_model or vin
 
                     charging_raw, charging_state = _charging_state(ev)
+                    evcs_name, evcs = _find_evcs(records, _connection(ev))
+                    evcs_status = evcs.get('/Status')
+                    if evcs_status is not None:
+                        # Live EVCS status beats the (possibly stale) vehicle API state
+                        charging_state = EVCS_STATUS_MAP.get(int(_num(evcs_status, 1)), 'Stopped')
                     soc           = max(0, min(100, int(round(_num(ev.get('/Soc'), 0)))))
                     range_km      = _num(ev.get('/RangeToGo'), 0)
                     limit_soc     = int(_num(ev.get('/TargetSoc'), 100)) or 100
-                    max_current   = int(_num(ev.get('/Ac/MaxChargeCurrent'), 16))
-                    power_w       = _num(ev.get('/Ac/Power'), 0) or _num(ev.get('/Dc/Power'), 0)
+                    max_current   = int(_num(ev.get('/Ac/MaxChargeCurrent'), 0)
+                                        or _num(evcs.get('/SetCurrent'), 0) or 16)
+                    power_w       = (_num(ev.get('/Ac/Power'), 0) or _num(ev.get('/Dc/Power'), 0)
+                                     or _num(evcs.get('/Ac/Power'), 0))
                     energy_total  = ev.get('/Ac/Energy/Forward')
                     energy_total  = _num(energy_total, None) if energy_total is not None else None
+                    evcs_session  = evcs.get('/Session/Energy')
+                    evcs_session  = _num(evcs_session, None) if evcs_session is not None else None
                     last_contact  = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact')
                                          or ev.get('/LastEvContact'), 0)
                     odometer      = _num(ev.get('/Odometer'), 0)
@@ -213,6 +253,12 @@ def poll_vrm():
                         # No VIN yet but vehicle connected – use last known real VIN
                         vin = sticky['vin']
                         print(f'[VRM] Sticky VIN for inst={inst}: using {vin} during identification grace period.', flush=True)
+                    elif not raw_vin and charging_state == 'Disconnected' and cfg.get(f'vin_inst_{inst}'):
+                        # Not plugged in and no VIN reported (e.g. after restart) – keep
+                        # history/stats under the last real VIN instead of EV_<inst>
+                        vin = cfg[f'vin_inst_{inst}']
+                    if raw_vin:
+                        cfg[f'vin_inst_{inst}'] = raw_vin
 
                     # ── Session energy ─────────────────────────────────────────────
                     # EVCC queries charge_energy_added; a missing field makes its jq
@@ -222,7 +268,9 @@ def poll_vrm():
                         sess = _cache['sessions'].get(inst) or {'energy_kwh': 0.0, 'state': 'Disconnected'}
                         if sess['state'] == 'Disconnected' and charging_state != 'Disconnected':
                             sess = {'energy_kwh': 0.0, 'state': charging_state}   # new plug-in → new session
-                        if energy_total is not None:
+                        if evcs_session is not None:
+                            sess['energy_kwh'] = evcs_session
+                        elif energy_total is not None:
                             if sess.get('meter_start') is None or energy_total < sess['meter_start']:
                                 sess['meter_start'] = energy_total - sess['energy_kwh']
                             sess['energy_kwh'] = energy_total - sess['meter_start']
@@ -271,7 +319,9 @@ def poll_vrm():
                     cycles_key = f'charge_cycles_{vin}'
                     last_soc_key = f'last_soc_for_cycles_{vin}'
                     last_soc = cfg.get(last_soc_key, soc)
-                    if veh_capacity > 0 and soc > last_soc:
+                    # Only count SoC gains while plugged in – ignores SoC jitter
+                    # (55→54→55 %) of a parked car.
+                    if veh_capacity > 0 and soc > last_soc and charging_state != 'Disconnected':
                         cfg[cycles_key] = cfg.get(cycles_key, 0.0) + (soc - last_soc) / 100.0
                     cfg[last_soc_key] = soc
 
@@ -298,12 +348,14 @@ def poll_vrm():
                         'last_ev_contact': last_contact,
                         'odometer':        odometer,
                         'name':            custom_name,
+                        'raw':             {'ev': ev, 'evcs_device': evcs_name, 'evcs': evcs},
                     }
 
                     print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
                           f'State={charging_state}  Power={power_w}W  raw=ChargingState:{charging_raw}'
-                          f' Connection:{ev.get("/Mgmt/Connection") or ev.get("Mgmt/Connection") or "-"}'
-                          f' AtSite:{ev.get("/AtSite", "-")}', flush=True)
+                          f' Connection:{_connection(ev) or "-"} AtSite:{ev.get("/AtSite", "-")}'
+                          f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}',
+                          flush=True)
 
                 _save_cfg(cfg)
 
@@ -1056,6 +1108,11 @@ class Handler(BaseHTTPRequestHandler):
             if not vehicles:
                 self._json({'error': error or 'Waiting for first VRM poll'}, 503)
                 return
+            if age > _stale_after():
+                # Don't let EVCC plan with an hours-old SoC while VRM is unreachable
+                self._json({'error': f'VRM data is {age}s old: {error or "no successful poll"}'}, 503,
+                           headers={'X-Data-Age-Seconds': str(age)})
+                return
 
             veh = _find_vehicle(vehicles, vin)
 
@@ -1066,11 +1123,20 @@ class Handler(BaseHTTPRequestHandler):
                 ok    = bool(_cache['vehicles'])
                 error = _cache['error']
                 ts    = _cache['ts']
+            age = int(time.time() - ts) if ts else None
+            if ok and age > _stale_after():
+                status = 'stale'
+            else:
+                status = 'ok' if ok else 'error'
             self._json({
-                'status': 'ok' if ok else 'error', 'error': error,
-                'data_age': int(time.time() - ts) if ts else None,
+                'status': status, 'error': error, 'data_age': age,
                 'site_id': _get('VRM_SITE_ID'), 'version': VERSION,
-            }, 200 if ok else 503)
+            }, 200 if status == 'ok' else 503)
+        elif path == '/api/raw':
+            # Debug: raw VRM values of each EV and the EVCS it is plugged into
+            with _lock:
+                vehicles = dict(_cache['vehicles'])
+            self._json({vin: veh.get('raw', {}) for vin, veh in vehicles.items()})
         else:
             self.send_response(404); self.end_headers()
 
@@ -1168,7 +1234,26 @@ def _backfill_last_full_charge():
         _save_cfg(cfg)
 
 
+def _healthcheck():
+    """Docker liveness probe: exit 0 if the HTTP server answers at all.
+    Reads the port from settings.json too, so a port changed in the UI is honoured.
+    VRM errors (HTTP 503) still count as alive – restarting won't fix VRM."""
+    import sys
+    from urllib.error import HTTPError
+    try:
+        urlopen(f'http://127.0.0.1:{_get_int("PORT", 8080)}/api/health', timeout=5)
+    except HTTPError:
+        pass
+    except Exception as exc:
+        print(f'unhealthy: {exc}')
+        sys.exit(1)
+    sys.exit(0)
+
+
 if __name__ == '__main__':
+    import sys
+    if '--healthcheck' in sys.argv:
+        _healthcheck()
     _backfill_last_full_charge()
     port = _get_int('PORT', 8080)
     print(f'[{APP_NAME}] v{VERSION}  port={port}  '
