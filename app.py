@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.1
+vrm-ev-proxy v2.2
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
 """
 
+import html
 import json
 import os
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.1"
+VERSION    = "2.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -27,10 +28,33 @@ BATTERY_PRESETS = {
 }
 
 # ── VRM → Tesla state mapping ──────────────────────────────────────────────────
+# /ChargingState enum of com.victronenergy.ev (victronenergy/venus wiki, dbus.md):
+#   0 Not charging, 1 Low power mode, 3 Charging, 244 Sustain, 245 Wake up,
+#   250 Blocked, 255 Unavailable, 256 Discharging, 257 Scheduled charging.
+# 0/1 don't tell plugged from unplugged – see _charging_state().
+# 2/4/5/6 are undocumented, kept from earlier versions for compatibility.
 CHARGING_STATE_MAP = {
-    0: 'Disconnected', 1: 'Disconnected', 2: 'Stopped',
-    3: 'Charging',     4: 'Complete',     5: 'Stopped', 6: 'Stopped',
+    0: 'Disconnected', 1: 'Disconnected',
+    3: 'Charging',
+    244: 'Complete',
+    245: 'Stopped', 250: 'Stopped', 256: 'Stopped', 257: 'Stopped',
+    255: 'Disconnected',
+    2: 'Stopped', 4: 'Complete', 5: 'Stopped', 6: 'Stopped',
 }
+
+def _charging_state(ev):
+    """Map VRM EV values to a Tesla charging_state."""
+    code  = int(_num(ev.get('/ChargingState'), 0))
+    state = CHARGING_STATE_MAP.get(code, 'Disconnected')
+    # Mgmt/Connection names the EVCS the EV is plugged into (e.g. 'evcharger:40')
+    plugged = bool(ev.get('/Mgmt/Connection') or ev.get('Mgmt/Connection'))
+    if code in (0, 1) and plugged:
+        state = 'Stopped'
+    # AtSite 0 = EV is not at this installation → can't be connected here
+    at_site = ev.get('/AtSite')
+    if at_site is not None and _num(at_site, 1) == 0:
+        state = 'Disconnected'
+    return code, state
 CHARGING_STATE_UI = {
     'Disconnected': ('🔌', 'Disconnected', '#6b7280'),
     'Stopped':      ('⏸',  'Connected',    '#f59e0b'),
@@ -44,12 +68,24 @@ _cache = {
     'ts': 0.0,
     'error': None,
     'error_count': 0,
-    'next_retry_in': 0,
+    'next_poll_at': 0.0,  # absolute time of the next VRM poll
     'sticky_vins': {},  # inst -> {'vin': str, 'ts': float}
+    'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
 }
 STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
-_lock  = threading.Lock()
-_start = time.time()
+_lock     = threading.Lock()
+_cfg_lock = threading.RLock()   # serialises read-modify-write of CONFIG_FILE
+_start    = time.time()
+
+# Numeric settings: key -> (type, min, max)
+NUMERIC_SETTINGS = {
+    'POLL_INTERVAL':      (int,   10, 3600),
+    'PORT':               (int,   1,  65535),
+    'CAPACITY':           (float, 1,  200),
+    'OPT_MIN':            (int,   0,  50),
+    'OPT_MAX':            (int,   50, 100),
+    'FULL_REMINDER_DAYS': (int,   7,  90),
+}
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -61,16 +97,41 @@ def _load_cfg():
         return {}
 
 def _save_cfg(cfg):
+    # Atomic write: a crash mid-write must never leave a truncated settings file
+    # (which _load_cfg would silently turn into {} → all settings/history lost).
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
+    tmp = CONFIG_FILE + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(cfg, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONFIG_FILE)
 
 def _get(key, default=''):
     return _load_cfg().get(key) or os.environ.get(key, default)
 
+def _num(value, default=0.0):
+    """Parse a VRM rawValue / setting to float; None, '' or garbage → default."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _get_int(key, default):
+    return int(_num(_get(key, str(default)), default))
+
+def _get_float(key, default):
+    return _num(_get(key, str(default)), default)
+
+def _esc(value):
+    return html.escape(str(value), quote=True)
+
 def _bat():
     """Return battery preset dict for configured type."""
     return BATTERY_PRESETS.get(_get('BATTERY_TYPE', 'LFP'), BATTERY_PRESETS['LFP'])
+
+def _interval():
+    return max(10, _get_int('POLL_INTERVAL', 60))
 
 def _is_configured():
     """Return True if both VRM_TOKEN and VRM_SITE_ID are set."""
@@ -79,6 +140,7 @@ def _is_configured():
 
 # ── VRM Poller ─────────────────────────────────────────────────────────────────
 def poll_vrm():
+    last_poll = 0.0
     while True:
         try:
             token   = _get('VRM_TOKEN')
@@ -92,7 +154,8 @@ def poll_vrm():
             with urlopen(req, timeout=30) as resp:
                 records = json.loads(resp.read())['records']
 
-            ev_records = [r for r in records if r.get('Device') == 'Electric Vehicle']
+            ev_records = [r for r in records
+                          if r.get('Device') == 'Electric Vehicle' and r.get('dbusPath')]
 
             if not ev_records:
                 raise ValueError('No EV device found in VRM – is the Tesla configured in VRM?')
@@ -105,128 +168,172 @@ def poll_vrm():
                     by_instance[inst] = {}
                 by_instance[inst][r['dbusPath']] = r['rawValue']
 
-            cfg = _load_cfg()
+            now      = time.time()
+            elapsed  = min(now - last_poll, 2 * _interval()) if last_poll else 0
+            last_poll = now
+            capacity = _get_float('CAPACITY', 0)
+            bat      = _bat()
+            opt_max  = _get_int('OPT_MAX', bat['opt_max'])
             vehicles = {}
 
-            for inst, ev in by_instance.items():
-                # Extract VIN
-                raw_vin = str(ev.get('/Serial') or ev.get('/VIN') or '')
-                fallback = f'EV_{inst}'
-                vin = raw_vin or fallback
-                custom_name = str(ev.get('/CustomName') or '') or vin
+            with _cfg_lock:
+                cfg = _load_cfg()
 
-                charging_raw  = int(float(ev.get('/ChargingState', 0)))
-                soc           = int(float(ev.get('/Soc', 0)))
-                range_km      = float(ev.get('/RangeToGo', 0))
-                limit_soc     = int(float(ev.get('/TargetSoc', 100)))
-                max_current   = int(float(ev.get('/Ac/MaxChargeCurrent', 16)))
-                power_w       = float(ev.get('/Ac/Power', 0))
-                last_contact  = float(ev.get('/LastEvContact', 0))
-                odometer      = float(ev.get('/Odometer', 0))
-                charging_state = CHARGING_STATE_MAP.get(charging_raw, 'Disconnected')
+                for inst, ev in by_instance.items():
+                    # Extract VIN
+                    raw_vin = str(ev.get('/VIN') or ev.get('/Serial') or '').strip()
+                    fallback = f'EV_{inst}'
+                    vin = raw_vin or fallback
+                    brand_model = ' '.join(str(ev.get(k) or '') for k in ('/Brand', '/Model')).strip()
+                    custom_name = str(ev.get('/CustomName') or '') or brand_model or vin
 
-                # ── Sticky VIN: hold last known real VIN while VRM catches up ──
-                now_t = time.time()
-                with _lock:
-                    sticky = _cache['sticky_vins'].get(inst, {})
-                if raw_vin and charging_state != 'Disconnected':
-                    # Real VIN seen while actively connected – refresh sticky record
+                    charging_raw, charging_state = _charging_state(ev)
+                    soc           = max(0, min(100, int(round(_num(ev.get('/Soc'), 0)))))
+                    range_km      = _num(ev.get('/RangeToGo'), 0)
+                    limit_soc     = int(_num(ev.get('/TargetSoc'), 100)) or 100
+                    max_current   = int(_num(ev.get('/Ac/MaxChargeCurrent'), 16))
+                    power_w       = _num(ev.get('/Ac/Power'), 0) or _num(ev.get('/Dc/Power'), 0)
+                    energy_total  = ev.get('/Ac/Energy/Forward')
+                    energy_total  = _num(energy_total, None) if energy_total is not None else None
+                    last_contact  = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact')
+                                         or ev.get('/LastEvContact'), 0)
+                    odometer      = _num(ev.get('/Odometer'), 0)
+                    veh_capacity  = capacity or _num(ev.get('/BatteryCapacity'), 0)
+
+                    # ── Sticky VIN: hold last known real VIN while VRM catches up ──
+                    now_t = time.time()
                     with _lock:
-                        _cache['sticky_vins'][inst] = {'vin': raw_vin, 'ts': now_t}
-                elif charging_state != 'Disconnected' and sticky.get('vin') and \
-                        (now_t - sticky.get('ts', 0)) < STICKY_VIN_GRACE:
-                    # No VIN yet but vehicle connected – use last known real VIN
-                    vin = sticky['vin']
-                    print(f'[VRM] Sticky VIN for inst={inst}: using {vin} during identification grace period.', flush=True)
+                        sticky = _cache['sticky_vins'].get(inst, {})
+                    if raw_vin and charging_state != 'Disconnected':
+                        # Real VIN seen while actively connected – refresh sticky record
+                        with _lock:
+                            _cache['sticky_vins'][inst] = {'vin': raw_vin, 'ts': now_t}
+                    elif charging_state != 'Disconnected' and sticky.get('vin') and \
+                            (now_t - sticky.get('ts', 0)) < STICKY_VIN_GRACE:
+                        # No VIN yet but vehicle connected – use last known real VIN
+                        vin = sticky['vin']
+                        print(f'[VRM] Sticky VIN for inst={inst}: using {vin} during identification grace period.', flush=True)
 
-                data = {
-                    'battery_level':    soc,
-                    'battery_range':    round(range_km / 1.60934, 2),
-                    'charge_limit_soc': limit_soc,
-                    'charging_state':   charging_state,
-                    'charge_amps':      max_current,
-                }
+                    # ── Session energy ─────────────────────────────────────────────
+                    # EVCC queries charge_energy_added; a missing field makes its jq
+                    # return null, which EVCC fails to parse on every cycle.
+                    # Prefer the /Ac/Energy/Forward meter, else integrate power.
+                    with _lock:
+                        sess = _cache['sessions'].get(inst) or {'energy_kwh': 0.0, 'state': 'Disconnected'}
+                        if sess['state'] == 'Disconnected' and charging_state != 'Disconnected':
+                            sess = {'energy_kwh': 0.0, 'state': charging_state}   # new plug-in → new session
+                        if energy_total is not None:
+                            if sess.get('meter_start') is None or energy_total < sess['meter_start']:
+                                sess['meter_start'] = energy_total - sess['energy_kwh']
+                            sess['energy_kwh'] = energy_total - sess['meter_start']
+                        elif charging_state == 'Charging' and power_w > 0 and elapsed > 0:
+                            sess['energy_kwh'] += power_w * elapsed / 3_600_000
+                        sess['state'] = charging_state
+                        _cache['sessions'][inst] = sess
+                    energy_added = sess['energy_kwh']
 
-                # ── Track last full charge (per VIN) ──────────────────────────
-                lfc_key = f'last_full_charge_{vin}'
-                if soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped'):
-                    cfg[lfc_key] = time.time()
-                    print(f'[VRM] Full charge detected for {vin} – timestamp saved.', flush=True)
+                    # ── Estimated minutes to reach charge limit ────────────────────
+                    minutes_to_full = 0
+                    if charging_state == 'Charging' and power_w > 100 and veh_capacity > 0 and soc < limit_soc:
+                        kwh_left = (limit_soc - soc) / 100.0 * veh_capacity
+                        minutes_to_full = int(kwh_left / (power_w / 1000) * 60)
 
-                # ── SoC history (hourly snapshots, per VIN) ────────────────────
-                hist_key = f'soc_history_{vin}'
-                history = cfg.get(hist_key, [])
-                now = time.time()
-                if not history or now - history[-1][0] >= 3600:
-                    history.append([int(now), soc])
-                    cfg[hist_key] = history[-168:]
+                    data = {
+                        'battery_level':          soc,
+                        'usable_battery_level':   soc,
+                        'battery_range':          round(range_km / 1.60934, 2),
+                        'charge_limit_soc':       limit_soc,
+                        'charging_state':         charging_state,
+                        'charge_amps':            max_current,
+                        'charge_current_request': max_current,
+                        'charger_power':          round(power_w / 1000),
+                        'charge_energy_added':    round(energy_added, 2),
+                        'minutes_to_full_charge': minutes_to_full,
+                        'time_to_full_charge':    round(minutes_to_full / 60, 2),
+                        'timestamp':              int(now * 1000),
+                    }
 
-                # ── Charge cycle counter (per VIN) ─────────────────────────────
-                capacity = float(_get('CAPACITY', '0'))
-                cycles_key = f'charge_cycles_{vin}'
-                last_soc_key = f'last_soc_for_cycles_{vin}'
-                last_soc = cfg.get(last_soc_key, soc)
-                if capacity > 0 and soc > last_soc:
-                    delta_kwh = (soc - last_soc) / 100.0 * capacity
-                    cfg[cycles_key] = cfg.get(cycles_key, 0.0) + delta_kwh / capacity
-                cfg[last_soc_key] = soc
+                    # ── Track last full charge (per VIN) ──────────────────────────
+                    lfc_key = f'last_full_charge_{vin}'
+                    if soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped'):
+                        if now - cfg.get(lfc_key, 0) > 3600:
+                            print(f'[VRM] Full charge detected for {vin} – timestamp saved.', flush=True)
+                        cfg[lfc_key] = now
 
-                # ── Time above optimal (per VIN) ────────────────────────────────
-                bat       = _bat()
-                opt_max   = int(_get('OPT_MAX', str(bat['opt_max'])))
-                interval  = int(_get('POLL_INTERVAL', '60'))
+                    # ── SoC history (hourly snapshots, per VIN) ────────────────────
+                    hist_key = f'soc_history_{vin}'
+                    history = cfg.get(hist_key, [])
+                    if not history or now - history[-1][0] >= 3600:
+                        history.append([int(now), soc])
+                        cfg[hist_key] = history[-168:]
 
-                week_start_key = f'time_above_week_start_{vin}'
-                time_above_key = f'time_above_optimal_{vin}'
-                week_start = cfg.get(week_start_key, now)
-                if now - week_start >= 7 * 86400:
-                    cfg[time_above_key] = 0
-                    cfg[week_start_key] = now
-                elif week_start_key not in cfg:
-                    cfg[week_start_key] = now
+                    # ── Charge cycle counter (per VIN) ─────────────────────────────
+                    cycles_key = f'charge_cycles_{vin}'
+                    last_soc_key = f'last_soc_for_cycles_{vin}'
+                    last_soc = cfg.get(last_soc_key, soc)
+                    if veh_capacity > 0 and soc > last_soc:
+                        cfg[cycles_key] = cfg.get(cycles_key, 0.0) + (soc - last_soc) / 100.0
+                    cfg[last_soc_key] = soc
 
-                if soc > opt_max:
-                    cfg[time_above_key] = cfg.get(time_above_key, 0) + interval
+                    # ── Time above optimal (per VIN) ────────────────────────────────
+                    week_start_key = f'time_above_week_start_{vin}'
+                    time_above_key = f'time_above_optimal_{vin}'
+                    week_start = cfg.get(week_start_key, now)
+                    if now - week_start >= 7 * 86400:
+                        cfg[time_above_key] = 0
+                        cfg[week_start_key] = now
+                    elif week_start_key not in cfg:
+                        cfg[week_start_key] = now
 
-                vehicles[vin] = {
-                    'data':            data,
-                    'range_km':        range_km,
-                    'power_w':         power_w,
-                    'last_ev_contact': last_contact,
-                    'odometer':        odometer,
-                    'name':            custom_name,
-                }
+                    if soc > opt_max:
+                        # Real elapsed time (capped), not the nominal interval – so
+                        # error backoffs and settings changes don't skew the counter.
+                        cfg[time_above_key] = cfg.get(time_above_key, 0) + elapsed
 
-                print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
-                      f'State={charging_state}  Power={power_w}W', flush=True)
+                    vehicles[vin] = {
+                        'data':            data,
+                        'capacity':        veh_capacity,
+                        'range_km':        range_km,
+                        'power_w':         power_w,
+                        'last_ev_contact': last_contact,
+                        'odometer':        odometer,
+                        'name':            custom_name,
+                    }
 
-            _save_cfg(cfg)
+                    print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
+                          f'State={charging_state}  Power={power_w}W  raw=ChargingState:{charging_raw}'
+                          f' Connection:{ev.get("/Mgmt/Connection") or ev.get("Mgmt/Connection") or "-"}'
+                          f' AtSite:{ev.get("/AtSite", "-")}', flush=True)
+
+                _save_cfg(cfg)
 
             with _lock:
                 _cache['vehicles']    = vehicles
                 _cache['ts']          = time.time()
                 _cache['error']       = None
                 _cache['error_count'] = 0
-                _cache['next_retry_in'] = 0
+                _cache['next_poll_at'] = time.time() + _interval()
 
         except Exception as exc:
+            # Never let the poller thread die – it is the only data source.
             with _lock:
                 _cache['error'] = str(exc)
                 _cache['error_count'] += 1
-                wait = min(int(_get('POLL_INTERVAL', '60')) * (2 ** _cache['error_count']), 600)
-                _cache['next_retry_in'] = wait
-            print(f'[VRM] Error (attempt {_cache["error_count"]}): {exc}', flush=True)
+                count = _cache['error_count']
+                wait = min(_interval() * (2 ** min(count, 6)), max(600, _interval()))
+                _cache['next_poll_at'] = time.time() + wait
+            print(f'[VRM] Error (attempt {count}): {exc}', flush=True)
             time.sleep(wait)
             continue
 
-        time.sleep(int(_get('POLL_INTERVAL', '60')))
+        time.sleep(_interval())
 
 
 # ── SoC color ──────────────────────────────────────────────────────────────────
 def _soc_color(soc):
     bat     = _bat()
-    opt_min = int(_get('OPT_MIN', str(bat['opt_min'])))
-    opt_max = int(_get('OPT_MAX', str(bat['opt_max'])))
+    opt_min = _get_int('OPT_MIN', bat['opt_min'])
+    opt_max = _get_int('OPT_MAX', bat['opt_max'])
     if soc < opt_min:    return '#ef4444'   # below min → red
     if soc <= opt_max:   return '#22c55e'   # in range  → green
     return '#f59e0b'                         # above max → amber warning
@@ -407,7 +514,6 @@ button[type=submit] {
   cursor: pointer; transition: background .15s;
 }
 button[type=submit]:hover { background: #2563eb; }
-.toggle-pw { font-size: .72rem; color: #3b82f6; cursor: pointer; display: inline-block; }
 .footer { margin-top: 1.2rem; font-size: .7rem; color: #334155; text-align: center; }
 #countdown { font-variant-numeric: tabular-nums; }
 code { background: #0f172a; padding: .1rem .35rem; border-radius: 4px;
@@ -463,31 +569,29 @@ def build_status_page():
         ts           = _cache['ts']
         error        = _cache['error']
         error_count  = _cache['error_count']
-        next_retry   = _cache['next_retry_in']
+        next_poll_at = _cache['next_poll_at']
 
     cfg      = _load_cfg()
     bat      = _bat()
     bat_type = _get('BATTERY_TYPE', 'LFP')
-    opt_min  = int(_get('OPT_MIN', str(bat['opt_min'])))
-    opt_max  = int(_get('OPT_MAX', str(bat['opt_max'])))
-    capacity = float(_get('CAPACITY', '0'))
-    interval = int(_get('POLL_INTERVAL', '60'))
-
+    if bat_type not in BATTERY_PRESETS:
+        bat_type = 'LFP'
+    opt_min  = _get_int('OPT_MIN', bat['opt_min'])
+    opt_max  = _get_int('OPT_MAX', bat['opt_max'])
     age       = int(time.time() - ts) if ts else 0
-    next_poll = max(0, interval - age)
+    next_poll = max(1, int(next_poll_at - time.time())) if next_poll_at else _interval()
     uptime    = int(time.time() - _start)
     up_str    = f'{uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s'
     ts_str    = time.strftime('%d.%m.%Y %H:%M:%S', time.localtime(ts)) if ts else '–'
 
-    error_box = f'<div class="error-box">⚠️ {error}</div>' if error else ''
+    error_box = f'<div class="error-box">⚠️ {_esc(error)}</div>' if error else ''
 
     # Build next poll / retry display
     if error and error_count > 0:
-        next_poll_display = f'<span class="meta-val" id="countdown">in {next_retry}s (attempt {error_count})</span>'
-        countdown_val = next_retry
+        next_poll_display = f'<span class="meta-val" id="countdown">in {next_poll}s (attempt {error_count})</span>'
     else:
         next_poll_display = f'<span class="meta-val" id="countdown">in {next_poll}s</span>'
-        countdown_val = next_poll
+    countdown_val = next_poll + 2   # reload shortly after the poll has finished
 
     main_cards = ''
 
@@ -523,7 +627,7 @@ def build_status_page():
 
             # Charge cycles (per VIN)
             cycles     = cfg.get(f'charge_cycles_{vin}', 0.0)
-            cycles_str = f'{cycles:.1f}' if capacity > 0 else '–'
+            cycles_str = f'{cycles:.1f}' if veh.get('capacity') else '–'
 
             soc       = data['battery_level']
             limit_soc = data['charge_limit_soc']
@@ -541,7 +645,7 @@ def build_status_page():
 
             # LFP full charge reminder
             if bat_type == 'LFP' and bat['full_reminder_days']:
-                remind_after = int(_get('FULL_REMINDER_DAYS', str(bat['full_reminder_days'])))
+                remind_after = _get_int('FULL_REMINDER_DAYS', bat['full_reminder_days'])
                 if last_full and (time.time() - last_full) / 86400 > remind_after:
                     days_overdue = int((time.time() - last_full) / 86400)
                     warnings += (f'<div class="info-box">ℹ️ LFP BMS balancing: last full charge was '
@@ -587,8 +691,8 @@ def build_status_page():
             main_cards += warnings + f"""
         <div class="card" style="border-color:#334155">
           <div style="font-size:.85rem;font-weight:600;color:#94a3b8;margin-bottom:.6rem">
-            🚗 {veh_name}
-            <span style="font-size:.7rem;color:#475569;margin-left:.5rem">VIN: {vin}</span>
+            🚗 {_esc(veh_name)}
+            <span style="font-size:.7rem;color:#475569;margin-left:.5rem">VIN: {_esc(vin)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
             <div class="label" style="margin:0">State of Charge</div>
@@ -669,7 +773,7 @@ def build_status_page():
             <span>Bridge</span>
             <span class="meta-val"><span class="dot green"></span>Online</span>
           </div>
-          <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_get('VRM_SITE_ID','–')}</span></div>
+          <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_esc(_get('VRM_SITE_ID','–'))}</span></div>
           <div class="meta-row"><span>Last update</span><span class="meta-val">{ts_str}</span></div>
           <div class="meta-row"><span>Data age</span><span class="meta-val">{age}s</span></div>
           <div class="meta-row"><span>Next poll</span>{next_poll_display}</div>
@@ -694,6 +798,9 @@ def build_settings_page(saved=False, error_msg=''):
     opt_max  = cfg.get('OPT_MAX') or os.environ.get('OPT_MAX', str(bat['opt_max']))
     reminder = cfg.get('FULL_REMINDER_DAYS') or os.environ.get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else '(not set)'
+    # The full token is never sent to the browser – the UI has no login.
+    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked = map(
+        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked))
 
     lfp_sel = 'selected' if bat_type == 'LFP' else ''
     nmc_sel = 'selected' if bat_type == 'NMC' else ''
@@ -702,7 +809,7 @@ def build_settings_page(saved=False, error_msg=''):
     if saved:
         notice = '<div class="success-box">✅ Settings saved – taking effect on next poll.</div>'
     elif error_msg:
-        notice = f'<div class="error-box">⚠️ {error_msg}</div>'
+        notice = f'<div class="error-box">⚠️ {_esc(error_msg)}</div>'
 
     # First-run wizard welcome banner
     welcome_banner = ''
@@ -730,16 +837,7 @@ def build_settings_page(saved=False, error_msg=''):
         <input type="password" name="VRM_TOKEN" id="tok"
                placeholder="Leave empty to keep current" autocomplete="off">
         <div class="hint">
-          Current: <span id="tok-masked">{masked}</span>
-          <span id="tok-full" style="display:none;word-break:break-all">{token}</span>
-          &nbsp;<span class="toggle-pw" onclick="
-            var m=document.getElementById('tok-masked');
-            var f=document.getElementById('tok-full');
-            var shown=f.style.display!=='none';
-            m.style.display=shown?'':'none';
-            f.style.display=shown?'none':'';
-            this.textContent=shown?'show':'hide';
-          ">show</span>
+          Current: {masked}
         </div>
 
         {siteid_label}
@@ -768,7 +866,7 @@ def build_settings_page(saved=False, error_msg=''):
 
         <label>Battery Capacity (kWh)</label>
         <input type="number" name="CAPACITY" value="{capacity}" placeholder="e.g. 60" min="1" max="200" step="0.1">
-        <div class="hint">Required for charge cycle counting</div>
+        <div class="hint">Leave empty to use the capacity reported by VRM (<code>/BatteryCapacity</code>)</div>
 
         <label>LFP Full Charge Reminder (days)</label>
         <input type="number" name="FULL_REMINDER_DAYS" value="{reminder}"
@@ -860,20 +958,69 @@ def build_api_page():
            style="color:#3b82f6;font-size:.75rem;margin-left:.5rem;text-transform:none">open ↗</a>
       </div>
       <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
-                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{health_json}</pre>
+                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(health_json)}</pre>
     </div>
     <div class="card">
       <div class="label">GET /api/1/vehicles/&lt;VIN&gt;/vehicle_data – Live
         <span style="color:#475569;font-size:.72rem">(age: {age}s)</span>
       </div>
       <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
-                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{vehicle_json}</pre>
+                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(vehicle_json)}</pre>
     </div>"""
 
     return _page('API', 'api', body)
 
 
 # ── HTTP Handler ───────────────────────────────────────────────────────────────
+_warned_vins = set()
+
+def _find_vehicle(vehicles, vin):
+    """Match requested VIN (case-insensitive); fall back to the first vehicle."""
+    if vin:
+        for key, veh in vehicles.items():
+            if key.upper() == vin.upper():
+                return veh
+        if len(vehicles) > 1 and vin not in _warned_vins:
+            _warned_vins.add(vin)
+            print(f'[HTTP] VIN {vin} not found in VRM data {list(vehicles)} – '
+                  f'serving first vehicle. Check the VIN in EVCC.', flush=True)
+    return next(iter(vehicles.values()))
+
+
+def _parse_settings(params):
+    """Validate submitted settings. Returns (updates, error_msg)."""
+    updates = {}
+    site_id = params.get('VRM_SITE_ID', '').strip()
+    if site_id:
+        if not site_id.isdigit():
+            return {}, 'VRM Site ID must be numeric.'
+        updates['VRM_SITE_ID'] = site_id
+    bat_type = params.get('BATTERY_TYPE', '').strip()
+    if bat_type:
+        if bat_type not in BATTERY_PRESETS:
+            return {}, f'Unknown battery type: {bat_type}'
+        updates['BATTERY_TYPE'] = bat_type
+    for key, (typ, lo, hi) in NUMERIC_SETTINGS.items():
+        raw = params.get(key, '').strip()
+        if not raw:
+            if key == 'CAPACITY' and key in params:
+                updates[key] = None   # cleared → fall back to VRM /BatteryCapacity
+            continue
+        try:
+            val = typ(raw)
+        except ValueError:
+            return {}, f'{key}: "{raw}" is not a valid number.'
+        if not lo <= val <= hi:
+            return {}, f'{key} must be between {lo} and {hi}.'
+        updates[key] = str(val)
+    if int(updates.get('OPT_MIN', 0)) >= int(updates.get('OPT_MAX', 100)):
+        return {}, 'Optimal minimum must be lower than optimal maximum.'
+    token = params.get('VRM_TOKEN', '').strip()
+    if token:
+        updates['VRM_TOKEN'] = token
+    return updates, ''
+
+
 class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -910,12 +1057,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': error or 'Waiting for first VRM poll'}, 503)
                 return
 
-            veh = None
-            if vin and vin in vehicles:
-                veh = vehicles[vin]
-            else:
-                # Fallback: serve first available vehicle
-                veh = next(iter(vehicles.values()))
+            veh = _find_vehicle(vehicles, vin)
 
             self._json({'response': {'response': {'charge_state': veh['data']}}},
                        headers={'X-Data-Age-Seconds': str(age)})
@@ -935,26 +1077,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         if path == '/settings':
-            length = int(self.headers.get('Content-Length', 0))
-            params = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
-            cfg    = _load_cfg()
-            for key in ('VRM_SITE_ID', 'POLL_INTERVAL', 'PORT', 'BATTERY_TYPE',
-                        'CAPACITY', 'OPT_MIN', 'OPT_MAX', 'FULL_REMINDER_DAYS'):
-                if params.get(key):
-                    cfg[key] = params[key].strip()
-            if params.get('VRM_TOKEN'):
-                cfg['VRM_TOKEN'] = params['VRM_TOKEN'].strip()
+            params = {k: v[0] for k, v in parse_qs(self._read_body().decode(errors='replace'), keep_blank_values=True).items()}
+            updates, err = _parse_settings(params)
+            if err:
+                self._html(build_settings_page(error_msg=err))
+                return
             try:
-                _save_cfg(cfg)
+                with _cfg_lock:
+                    cfg = _load_cfg()
+                    for key, val in updates.items():
+                        if val is None:
+                            cfg.pop(key, None)
+                        else:
+                            cfg[key] = val
+                    _save_cfg(cfg)
                 print('[CFG] Settings saved.', flush=True)
                 self._html(build_settings_page(saved=True))
             except Exception as exc:
                 self._html(build_settings_page(error_msg=str(exc)))
         elif '/command/' in path:
-            # Drain request body
-            length = int(self.headers.get('Content-Length', 0))
-            if length:
-                self.rfile.read(length)
+            self._read_body()   # drain request body
             parts = path.split('/')
             command = parts[-1] if parts else 'unknown'
             vin = None
@@ -968,25 +1110,34 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(404); self.end_headers()
 
-    def _html(self, content):
-        body = content.encode()
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(body)
+    def _read_body(self, limit=64 * 1024):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            length = 0
+        return self.rfile.read(min(max(length, 0), limit)) if length > 0 else b''
 
-    def _json(self, obj, code=200, headers=None):
-        body = json.dumps(obj).encode()
+    def _send(self, code, ctype, body, headers=None):
         self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def _html(self, content):
+        self._send(200, 'text/html; charset=utf-8', content.encode())
+
+    def _json(self, obj, code=200, headers=None):
+        self._send(code, 'application/json', json.dumps(obj).encode(), headers)
+
     def log_message(self, fmt, *args):
+        # EVCC polls vehicle_data several times per cycle (one request per field) –
+        # only log failures and POSTs to keep the container log readable.
         msg = fmt % args
-        if '/vehicle_data' in msg or 'POST' in msg:
+        if 'POST' in msg or (len(args) > 1 and str(args[1])[:1] in '45'):
             print(f'[HTTP] {msg}', flush=True)
 
 
@@ -1019,8 +1170,9 @@ def _backfill_last_full_charge():
 
 if __name__ == '__main__':
     _backfill_last_full_charge()
-    port = int(_get('PORT', '8080'))
+    port = _get_int('PORT', 8080)
     print(f'[{APP_NAME}] v{VERSION}  port={port}  '
           f'site={_get("VRM_SITE_ID","?")}  poll={_get("POLL_INTERVAL","60")}s', flush=True)
     threading.Thread(target=poll_vrm, daemon=True).start()
-    HTTPServer(('0.0.0.0', port), Handler).serve_forever()
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()

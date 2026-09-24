@@ -67,9 +67,26 @@ Everything is configured in the browser at `/settings` – no config files, no t
 ## EVCC setup
 
 Add a vehicle in EVCC with these settings:
-- **Template:** Tesla BLE HTTP Proxy
-- **URL:** `http://<server-ip>:8080`
+- **Template:** Tesla BLE (`tesla-ble`)
+- **URL:** `http://<server-ip>` – **without** port, EVCC appends `:<port>` itself
+- **Port:** `8080`
 - **VIN:** your vehicle VIN
+
+```yaml
+vehicles:
+  - name: tesla
+    type: template
+    template: tesla-ble
+    title: Tesla
+    vin: 5YJ3E1EA0KF000001
+    url: http://192.168.1.10
+    port: 8080
+    capacity: 60
+```
+
+The proxy serves all fields the template reads from `charge_state`: `battery_level`, `battery_range` (miles), `charge_limit_soc`, `charge_amps`, `charging_state`, `charge_energy_added` (kWh per plug-in session – from the VRM energy meter `/Ac/Energy/Forward` if available, otherwise integrated from AC/DC power) and `minutes_to_full_charge` (estimate from battery capacity – `/settings` or VRM `/BatteryCapacity`).
+
+Known bugs and their status: [BUGS.md](BUGS.md)
 
 > **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
@@ -93,7 +110,9 @@ Both: color-coded SoC bar, 7-day history chart, charge cycle counter
 
 **`No EV device found`** → EV is not configured as a device in VRM
 
-**EVCC shows errors** → verify the vehicle URL in EVCC points to `http://<server-ip>:8080`
+**EVCC shows errors** → URL must be `http://<server-ip>` without port, port goes into the separate `port` field (otherwise EVCC calls `http://<ip>:8080:8080`)
+
+**Wrong vehicle / multiple EVs** → the VIN in EVCC must match the VIN shown on the status page; unknown VINs fall back to the first vehicle (logged once)
 
 ---
 
