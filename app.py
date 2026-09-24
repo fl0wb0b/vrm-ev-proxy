@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.3
+vrm-ev-proxy v2.4
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -15,7 +15,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.3"
+VERSION    = "2.4"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -113,6 +113,115 @@ NUMERIC_SETTINGS = {
     'OPT_MAX':            (int,   50, 100),
     'FULL_REMINDER_DAYS': (int,   7,  90),
 }
+
+# ── Web UI language (GUI only – logs, API and EVCC fields stay English) ────────
+LANGUAGES = {'auto': 'Auto (Browser)', 'de': 'Deutsch', 'en': 'English'}
+_req = threading.local()   # per-request language, set by the HTTP handler
+
+# English source text → German. Placeholders use str.format syntax.
+_DE = {
+    # navigation / page frame
+    'Status': 'Status', 'Settings': 'Einstellungen', 'API': 'API',
+    'in {n}s': 'in {n}s',
+    # charging states
+    'Disconnected': 'Getrennt', 'Connected': 'Verbunden', 'Charging': 'Lädt', 'Charged': 'Geladen',
+    # status page
+    'Waiting for first VRM poll…': 'Warte auf erste VRM-Abfrage…',
+    'Today': 'Heute', 'Yesterday': 'Gestern',
+    '{d}d ago ({date})': 'vor {d} Tagen ({date})',
+    'Not recorded yet': 'Noch nicht erfasst',
+    '{h}h this week': '{h} h diese Woche',
+    'SoC ({soc}%) is above the optimal maximum of {opt_max}% for {bat_type}.':
+        'SoC ({soc} %) liegt über dem optimalen Maximum von {opt_max} % für {bat_type}.',
+    'Reduce charging limit to protect the battery.': 'Ladelimit senken, um den Akku zu schonen.',
+    'OK for occasional full charge, but limit to 80% for daily use.':
+        'Gelegentlich voll laden ist ok, im Alltag aber auf 80 % begrenzen.',
+    'LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.':
+        'LFP-BMS-Balancing: letzte Vollladung vor {d} Tagen. Bald auf 100 % laden.',
+    'Charging Power': 'Ladeleistung',
+    'State of Charge': 'Ladezustand',
+    'Range': 'Reichweite', 'Odometer': 'Kilometerstand',
+    'SoC History – 7 days': 'SoC-Verlauf – 7 Tage',
+    'Not enough data yet (needs 2+ hours)': 'Noch zu wenig Daten (mind. 2 Stunden)',
+    'Optimal zone': 'Optimaler Bereich', '{opt_max}% limit': '{opt_max} % Grenze',
+    'Battery type': 'Akkutyp', 'Optimal range': 'Optimaler Bereich',
+    'Time above {opt_max}%': 'Zeit über {opt_max} %',
+    'Charge cycles': 'Ladezyklen', 'Last full charge': 'Letzte Vollladung',
+    'Last EV contact': 'Letzter Fahrzeugkontakt',
+    'Bridge': 'Bridge', 'Online': 'Online', 'Last update': 'Letzte Aktualisierung',
+    'Data age': 'Datenalter', 'Next poll': 'Nächste Abfrage', 'Uptime': 'Laufzeit',
+    'in {n}s (attempt {count})': 'in {n}s (Versuch {count})',
+    'Full charge recommended every 4 weeks for BMS balancing':
+        'Vollladung alle 4 Wochen für BMS-Balancing empfohlen',
+    'Keep below 90% for longevity. Avoid prolonged time above 80%.':
+        'Für lange Lebensdauer unter 90 % halten, längere Zeit über 80 % vermeiden.',
+    # settings page
+    'Settings saved – taking effect on next poll.': 'Einstellungen gespeichert – gelten ab der nächsten Abfrage.',
+    'Welcome to vrm-ev-proxy! Enter your VRM credentials below to get started.':
+        'Willkommen bei vrm-ev-proxy! Trage unten deine VRM-Zugangsdaten ein.',
+    'VRM Connection': 'VRM-Verbindung', 'VRM API Token': 'VRM-API-Token',
+    'VRM Site / Installation ID': 'VRM Site- / Installations-ID',
+    'Leave empty to keep current': 'Leer lassen, um den aktuellen zu behalten',
+    'Current:': 'Aktuell:', '(not set)': '(nicht gesetzt)',
+    'e.g. 123456': 'z.B. 123456',
+    'Found in VRM URL: …/installation/<b>XXXXX</b>/dashboard':
+        'Steht in der VRM-URL: …/installation/<b>XXXXX</b>/dashboard',
+    'Battery': 'Akku', 'Battery Chemistry': 'Zellchemie',
+    'LFP – Lithium Iron Phosphate (optimal: 10–80%)': 'LFP – Lithium-Eisenphosphat (optimal: 10–80 %)',
+    'NMC – Nickel Manganese Cobalt (optimal: 20–90%)': 'NMC – Nickel-Mangan-Kobalt (optimal: 20–90 %)',
+    'Optimal SoC Range (%)': 'Optimaler SoC-Bereich (%)',
+    'Min (🔴 below = warning)': 'Min (🔴 darunter = Warnung)',
+    'Max (🟡 above = warning)': 'Max (🟡 darüber = Warnung)',
+    'Battery Capacity (kWh)': 'Akkukapazität (kWh)', 'e.g. 60': 'z.B. 60',
+    'Leave empty to use the capacity reported by VRM (<code>/BatteryCapacity</code>)':
+        'Leer lassen, um die von VRM gemeldete Kapazität zu nutzen (<code>/BatteryCapacity</code>)',
+    'LFP Full Charge Reminder (days)': 'LFP-Erinnerung Vollladung (Tage)',
+    'Show reminder if no full charge in this many days (LFP only)':
+        'Erinnerung, wenn so viele Tage nicht voll geladen wurde (nur LFP)',
+    'Polling': 'Abfrage', 'Poll Interval (seconds)': 'Abfrageintervall (Sekunden)',
+    'HTTP Port': 'HTTP-Port', 'Restart required after port change.': 'Nach Portänderung Neustart nötig.',
+    'Interface': 'Oberfläche', 'Language': 'Sprache',
+    'Save Settings': 'Einstellungen speichern',
+    'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
+    'Status page': 'Statusseite', 'Health check (JSON)': 'Health-Check (JSON)',
+    # validation messages
+    'VRM Site ID must be numeric.': 'Die VRM Site-ID muss eine Zahl sein.',
+    'Unknown battery type: {v}': 'Unbekannter Akkutyp: {v}',
+    'Unknown language: {v}': 'Unbekannte Sprache: {v}',
+    '{key}: "{raw}" is not a valid number.': '{key}: „{raw}“ ist keine gültige Zahl.',
+    '{key} must be between {lo} and {hi}.': '{key} muss zwischen {lo} und {hi} liegen.',
+    'Optimal minimum must be lower than optimal maximum.': 'Das optimale Minimum muss unter dem Maximum liegen.',
+    # API page
+    'Endpoints': 'Endpunkte', 'Status page (UI)': 'Statusseite (UI)', 'Settings (UI)': 'Einstellungen (UI)',
+    'Health check · JSON': 'Health-Check · JSON', 'open ↗': 'öffnen ↗', 'age: {age}s': 'Alter: {age}s',
+    'Raw VRM values (debug)': 'VRM-Rohwerte (Debug)',
+}
+_WEEKDAYS = {'de': ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']}
+
+def _lang():
+    return getattr(_req, 'lang', 'en')
+
+def _resolve_lang(accept_language=''):
+    """Configured LANGUAGE, or the browser's preference when set to auto."""
+    lang = _get('LANGUAGE', 'auto')
+    if lang in ('de', 'en'):
+        return lang
+    for part in (accept_language or '').split(','):
+        code = part.split(';')[0].strip().lower()[:2]
+        if code in ('de', 'en'):
+            return code
+    return 'en'
+
+def _dec(value, digits=1):
+    """Format a decimal number with the current language's decimal separator."""
+    out = f'{value:.{digits}f}'
+    return out.replace('.', ',') if _lang() == 'de' else out
+
+def _t(text, **kw):
+    """Translate a GUI string into the current request language."""
+    if _lang() == 'de':
+        text = _DE.get(text, text)
+    return text.format(**kw) if kw else text
 
 
 # ── Config helpers ─────────────────────────────────────────────────────────────
@@ -394,7 +503,7 @@ def _soc_color(soc):
 # ── SVG History Chart ──────────────────────────────────────────────────────────
 def _build_chart(history, opt_min, opt_max):
     if len(history) < 2:
-        return '<div style="color:#475569;text-align:center;padding:1rem;font-size:.8rem">Not enough data yet (needs 2+ hours)</div>'
+        return '<div style="color:#475569;text-align:center;padding:1rem;font-size:.8rem">' + _t('Not enough data yet (needs 2+ hours)') + '</div>'
 
     W, H   = 440, 120
     PAD_L  = 28
@@ -451,7 +560,8 @@ def _build_chart(history, opt_min, opt_max):
     xlabels = ''
     seen_days = set()
     for ts, _ in history:
-        day = time.strftime('%a', time.localtime(ts))
+        lt  = time.localtime(ts)
+        day = _WEEKDAYS[_lang()][lt.tm_wday] if _lang() in _WEEKDAYS else time.strftime('%a', lt)
         x   = tx(ts)
         if day not in seen_days and x > PAD_L + 20:
             seen_days.add(day)
@@ -580,11 +690,11 @@ code { background: #0f172a; padding: .1rem .35rem; border-radius: 4px;
 # ── Page wrapper ───────────────────────────────────────────────────────────────
 def _page(title, nav_active, body, countdown=0):
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{_lang()}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} – {APP_NAME}</title>
+<title>{_t(title)} – {APP_NAME}</title>
 <style>{_CSS}</style>
 </head>
 <body>
@@ -592,8 +702,8 @@ def _page(title, nav_active, body, countdown=0):
   <h1>⚡ {APP_NAME}</h1>
   <p class="subtitle">v{VERSION} &nbsp;·&nbsp; Victron VRM → EVCC</p>
   <nav>
-    <a href="/"         class="{'active' if nav_active=='status'   else ''}">📊 Status</a>
-    <a href="/settings" class="{'active' if nav_active=='settings' else ''}">⚙️ Settings</a>
+    <a href="/"         class="{'active' if nav_active=='status'   else ''}">📊 {_t('Status')}</a>
+    <a href="/settings" class="{'active' if nav_active=='settings' else ''}">⚙️ {_t('Settings')}</a>
     <a href="/api"      class="{'active' if nav_active=='api'      else ''}">🔗 API</a>
   </nav>
   {body}
@@ -605,7 +715,7 @@ def _page(title, nav_active, body, countdown=0):
   if(!el||secs<=0) return;
   (function tick(){{
     if(secs<=0){{ location.reload(); return; }}
-    el.textContent='in '+secs+'s'; secs--;
+    el.textContent={json.dumps(_t('in {n}s'))}.replace('{{n}}', secs); secs--;
     setTimeout(tick,1000);
   }})();
 }})();
@@ -640,15 +750,15 @@ def build_status_page():
 
     # Build next poll / retry display
     if error and error_count > 0:
-        next_poll_display = f'<span class="meta-val" id="countdown">in {next_poll}s (attempt {error_count})</span>'
+        next_poll_display = f'<span class="meta-val" id="countdown">{_t("in {n}s (attempt {count})", n=next_poll, count=error_count)}</span>'
     else:
-        next_poll_display = f'<span class="meta-val" id="countdown">in {next_poll}s</span>'
+        next_poll_display = f'<span class="meta-val" id="countdown">{_t("in {n}s", n=next_poll)}</span>'
     countdown_val = next_poll + 2   # reload shortly after the poll has finished
 
     main_cards = ''
 
     if not vehicles:
-        main_cards = '<div class="card" style="text-align:center;padding:2rem;color:#f59e0b">⏳ Waiting for first VRM poll…</div>'
+        main_cards = '<div class="card" style="text-align:center;padding:2rem;color:#f59e0b">⏳ ' + _t('Waiting for first VRM poll…') + '</div>'
     else:
         for vin, veh in vehicles.items():
             data         = veh['data']
@@ -666,42 +776,46 @@ def build_status_page():
             last_full = cfg.get(lfc_key, 0)
             if last_full:
                 days_ago = (time.time() - last_full) / 86400
-                if days_ago < 1:     lf_str = 'Today'
-                elif days_ago < 2:   lf_str = 'Yesterday'
-                else:                lf_str = f'{int(days_ago)}d ago ({time.strftime("%d.%m.%Y", time.localtime(last_full))})'
+                if days_ago < 1:     lf_str = _t('Today')
+                elif days_ago < 2:   lf_str = _t('Yesterday')
+                else:                lf_str = _t('{d}d ago ({date})', d=int(days_ago),
+                                                 date=time.strftime("%d.%m.%Y", time.localtime(last_full)))
             else:
-                lf_str = 'Not recorded yet'
+                lf_str = _t('Not recorded yet')
 
             # Time above optimal this week (per VIN)
             time_above = cfg.get(f'time_above_optimal_{vin}', 0)
             ta_hours   = time_above / 3600
-            ta_str     = f'{ta_hours:.1f}h this week' if time_above else '0h this week'
+            ta_str     = _t('{h}h this week', h=_dec(ta_hours))
 
             # Charge cycles (per VIN)
             cycles     = cfg.get(f'charge_cycles_{vin}', 0.0)
-            cycles_str = f'{cycles:.1f}' if veh.get('capacity') else '–'
+            cycles_str = _dec(cycles) if veh.get('capacity') else '–'
 
             soc       = data['battery_level']
             limit_soc = data['charge_limit_soc']
             state     = data['charging_state']
             icon, state_label, state_color = CHARGING_STATE_UI.get(state, ('❓', state, '#6b7280'))
+            state_label = _t(state_label)
             bar_color = _soc_color(soc)
 
             warnings = ''
 
             # Warning: above optimal range
             if soc > opt_max:
-                warnings += (f'<div class="warning-box">⚠️ SoC ({soc}%) is above the optimal maximum '
-                             f'of {opt_max}% for {bat_type}. '
-                             f'{"Reduce charging limit to protect the battery." if bat_type == "NMC" else "OK for occasional full charge, but limit to 80% for daily use."}</div>')
+                advice = ('Reduce charging limit to protect the battery.' if bat_type == 'NMC'
+                          else 'OK for occasional full charge, but limit to 80% for daily use.')
+                warnings += (f'<div class="warning-box">⚠️ '
+                             f'{_t("SoC ({soc}%) is above the optimal maximum of {opt_max}% for {bat_type}.", soc=soc, opt_max=opt_max, bat_type=bat_type)} '
+                             f'{_t(advice)}</div>')
 
             # LFP full charge reminder
             if bat_type == 'LFP' and bat['full_reminder_days']:
                 remind_after = _get_int('FULL_REMINDER_DAYS', bat['full_reminder_days'])
                 if last_full and (time.time() - last_full) / 86400 > remind_after:
                     days_overdue = int((time.time() - last_full) / 86400)
-                    warnings += (f'<div class="info-box">ℹ️ LFP BMS balancing: last full charge was '
-                                 f'{days_overdue} days ago. Consider charging to 100% soon.</div>')
+                    warnings += (f'<div class="info-box">ℹ️ '
+                                 f'{_t("LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.", d=days_overdue)}</div>')
 
             # Optimal zone band in bar
             zone_html = (f'<div class="bar-zone" style="left:{opt_min}%;'
@@ -726,9 +840,9 @@ def build_status_page():
             if state == 'Charging' and power_w > 100:
                 power_html = f'''
             <div class="card">
-              <div class="label">Charging Power</div>
+              <div class="label">{_t('Charging Power')}</div>
               <div class="power-row" style="color:#22c55e">
-                ⚡ {power_w / 1000:.1f} <span class="unit">kW</span>
+                ⚡ {_dec(power_w / 1000)} <span class="unit">kW</span>
               </div>
             </div>'''
 
@@ -747,7 +861,7 @@ def build_status_page():
             <span style="font-size:.7rem;color:#475569;margin-left:.5rem">VIN: {_esc(vin)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
-            <div class="label" style="margin:0">State of Charge</div>
+            <div class="label" style="margin:0">{_t('State of Charge')}</div>
             {bat_badge}
           </div>
           <div class="value big" style="color:{bar_color}">{soc}<span class="unit"> %</span></div>
@@ -767,52 +881,52 @@ def build_status_page():
         {power_html}
         <div class="grid3">
           <div class="card small">
-            <div class="label">Range</div>
+            <div class="label">{_t('Range')}</div>
             <div class="value">{int(range_km)}<span class="unit"> km</span></div>
           </div>
           <div class="card small">
-            <div class="label">Status</div>
+            <div class="label">{_t('Status')}</div>
             <div class="value" style="font-size:.9em;color:{state_color}">{icon} {state_label}</div>
           </div>
           <div class="card small">
-            <div class="label">Odometer</div>
-            <div class="value" style="font-size:1.2rem">{int(odometer):,}<span class="unit"> km</span></div>
+            <div class="label">{_t('Odometer')}</div>
+            <div class="value" style="font-size:1.2rem">{f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")}<span class="unit"> km</span></div>
           </div>
         </div>
 
         <div class="card">
-          <div class="label" style="margin-bottom:.6rem">SoC History – 7 days</div>
+          <div class="label" style="margin-bottom:.6rem">{_t('SoC History – 7 days')}</div>
           {chart}
           <div style="display:flex;gap:1rem;margin-top:.5rem;font-size:.7rem;color:#475569">
-            <span style="color:#22c55e">━</span> Optimal zone
-            <span style="color:{bat['color']}">╷</span> {opt_max}% limit
+            <span style="color:#22c55e">━</span> {_t('Optimal zone')}
+            <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
             <span style="color:#38bdf8">━</span> SoC
           </div>
         </div>
 
         <div class="card">
           <div class="meta-row">
-            <span>Battery type</span>
-            <span class="meta-val">{bat_type} · {bat['note'][:50]}…</span>
+            <span>{_t('Battery type')}</span>
+            <span class="meta-val">{bat_type} · {_t(bat['note'])}</span>
           </div>
           <div class="meta-row">
-            <span>Optimal range</span>
+            <span>{_t('Optimal range')}</span>
             <span class="meta-val">{opt_min}% – {opt_max}%</span>
           </div>
           <div class="meta-row">
-            <span>Time above {opt_max}%</span>
+            <span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span>
             <span class="meta-val">{ta_str}</span>
           </div>
           <div class="meta-row">
-            <span>Charge cycles</span>
+            <span>{_t('Charge cycles')}</span>
             <span class="meta-val">{cycles_str}</span>
           </div>
           <div class="meta-row">
-            <span>Last full charge</span>
+            <span>{_t('Last full charge')}</span>
             <span class="meta-val">{lf_str}</span>
           </div>
           <div class="meta-row">
-            <span>Last EV contact</span>
+            <span>{_t('Last EV contact')}</span>
             <span class="meta-val">{lc_str}</span>
           </div>
         </div>
@@ -822,14 +936,14 @@ def build_status_page():
     main_cards += f"""
         <div class="card">
           <div class="meta-row">
-            <span>Bridge</span>
-            <span class="meta-val"><span class="dot green"></span>Online</span>
+            <span>{_t('Bridge')}</span>
+            <span class="meta-val"><span class="dot green"></span>{_t('Online')}</span>
           </div>
           <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_esc(_get('VRM_SITE_ID','–'))}</span></div>
-          <div class="meta-row"><span>Last update</span><span class="meta-val">{ts_str}</span></div>
-          <div class="meta-row"><span>Data age</span><span class="meta-val">{age}s</span></div>
-          <div class="meta-row"><span>Next poll</span>{next_poll_display}</div>
-          <div class="meta-row"><span>Uptime</span><span class="meta-val">{up_str}</span></div>
+          <div class="meta-row"><span>{_t('Last update')}</span><span class="meta-val">{ts_str}</span></div>
+          <div class="meta-row"><span>{_t('Data age')}</span><span class="meta-val">{age}s</span></div>
+          <div class="meta-row"><span>{_t('Next poll')}</span>{next_poll_display}</div>
+          <div class="meta-row"><span>{_t('Uptime')}</span><span class="meta-val">{up_str}</span></div>
         </div>"""
 
     body = error_box + main_cards
@@ -849,7 +963,10 @@ def build_settings_page(saved=False, error_msg=''):
     opt_min  = cfg.get('OPT_MIN') or os.environ.get('OPT_MIN', str(bat['opt_min']))
     opt_max  = cfg.get('OPT_MAX') or os.environ.get('OPT_MAX', str(bat['opt_max']))
     reminder = cfg.get('FULL_REMINDER_DAYS') or os.environ.get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
-    masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else '(not set)'
+    masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
+    language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
+    lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
+                        for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
     site_id, interval, port, capacity, opt_min, opt_max, reminder, masked = map(
         _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked))
@@ -859,24 +976,24 @@ def build_settings_page(saved=False, error_msg=''):
 
     notice = ''
     if saved:
-        notice = '<div class="success-box">✅ Settings saved – taking effect on next poll.</div>'
+        notice = f'<div class="success-box">✅ {_t("Settings saved – taking effect on next poll.")}</div>'
     elif error_msg:
         notice = f'<div class="error-box">⚠️ {_esc(error_msg)}</div>'
 
     # First-run wizard welcome banner
     welcome_banner = ''
     if not _is_configured():
-        welcome_banner = '''<div class="info-box" style="margin-bottom:1.2rem">
-    👋 Welcome to vrm-ev-proxy! Enter your VRM credentials below to get started.
+        welcome_banner = f'''<div class="info-box" style="margin-bottom:1.2rem">
+    👋 {_t('Welcome to vrm-ev-proxy! Enter your VRM credentials below to get started.')}
   </div>'''
 
     # Step badges for VRM token and site ID labels (shown when not configured)
     if not _is_configured():
-        token_label = '<label><span class="step-badge">1</span>VRM API Token</label>'
-        siteid_label = '<label><span class="step-badge">2</span>VRM Site / Installation ID</label>'
+        token_label = f'<label><span class="step-badge">1</span>{_t("VRM API Token")}</label>'
+        siteid_label = f'<label><span class="step-badge">2</span>{_t("VRM Site / Installation ID")}</label>'
     else:
-        token_label = '<label>VRM API Token</label>'
-        siteid_label = '<label>VRM Site / Installation ID</label>'
+        token_label = f'<label>{_t("VRM API Token")}</label>'
+        siteid_label = f'<label>{_t("VRM Site / Installation ID")}</label>'
 
     body = f"""
     {welcome_banner}
@@ -884,70 +1001,74 @@ def build_settings_page(saved=False, error_msg=''):
     <div class="card">
       <form method="POST" action="/settings">
 
-        <div class="section-title" style="margin-top:0;border-top:none;padding-top:0">VRM Connection</div>
+        <div class="section-title" style="margin-top:0;border-top:none;padding-top:0">{_t('VRM Connection')}</div>
         {token_label}
         <input type="password" name="VRM_TOKEN" id="tok"
-               placeholder="Leave empty to keep current" autocomplete="off">
+               placeholder="{_t('Leave empty to keep current')}" autocomplete="off">
         <div class="hint">
-          Current: {masked}
+          {_t('Current:')} {masked}
         </div>
 
         {siteid_label}
-        <input type="text" name="VRM_SITE_ID" value="{site_id}" placeholder="e.g. 123456">
-        <div class="hint">Found in VRM URL: …/installation/<b>XXXXX</b>/dashboard</div>
+        <input type="text" name="VRM_SITE_ID" value="{site_id}" placeholder="{_t('e.g. 123456')}">
+        <div class="hint">{_t('Found in VRM URL: …/installation/<b>XXXXX</b>/dashboard')}</div>
 
-        <div class="section-title">Battery</div>
+        <div class="section-title">{_t('Battery')}</div>
 
-        <label>Battery Chemistry</label>
+        <label>{_t('Battery Chemistry')}</label>
         <select name="BATTERY_TYPE" onchange="updatePreset(this.value)">
-          <option value="LFP" {lfp_sel}>LFP – Lithium Iron Phosphate (optimal: 10–80%)</option>
-          <option value="NMC" {nmc_sel}>NMC – Nickel Manganese Cobalt (optimal: 20–90%)</option>
+          <option value="LFP" {lfp_sel}>{_t('LFP – Lithium Iron Phosphate (optimal: 10–80%)')}</option>
+          <option value="NMC" {nmc_sel}>{_t('NMC – Nickel Manganese Cobalt (optimal: 20–90%)')}</option>
         </select>
 
-        <label>Optimal SoC Range (%)</label>
+        <label>{_t('Optimal SoC Range (%)')}</label>
         <div class="field-row">
           <div>
             <input type="number" name="OPT_MIN" id="opt_min" value="{opt_min}" min="0" max="50">
-            <div class="hint">Min (🔴 below = warning)</div>
+            <div class="hint">{_t('Min (🔴 below = warning)')}</div>
           </div>
           <div>
             <input type="number" name="OPT_MAX" id="opt_max" value="{opt_max}" min="50" max="100">
-            <div class="hint">Max (🟡 above = warning)</div>
+            <div class="hint">{_t('Max (🟡 above = warning)')}</div>
           </div>
         </div>
 
-        <label>Battery Capacity (kWh)</label>
-        <input type="number" name="CAPACITY" value="{capacity}" placeholder="e.g. 60" min="1" max="200" step="0.1">
-        <div class="hint">Leave empty to use the capacity reported by VRM (<code>/BatteryCapacity</code>)</div>
+        <label>{_t('Battery Capacity (kWh)')}</label>
+        <input type="number" name="CAPACITY" value="{capacity}" placeholder="{_t('e.g. 60')}" min="1" max="200" step="0.1">
+        <div class="hint">{_t('Leave empty to use the capacity reported by VRM (<code>/BatteryCapacity</code>)')}</div>
 
-        <label>LFP Full Charge Reminder (days)</label>
+        <label>{_t('LFP Full Charge Reminder (days)')}</label>
         <input type="number" name="FULL_REMINDER_DAYS" value="{reminder}"
                placeholder="28" min="7" max="90">
-        <div class="hint">Show reminder if no full charge in this many days (LFP only)</div>
+        <div class="hint">{_t('Show reminder if no full charge in this many days (LFP only)')}</div>
 
-        <div class="section-title">Polling</div>
-        <label>Poll Interval (seconds)</label>
+        <div class="section-title">{_t('Polling')}</div>
+        <label>{_t('Poll Interval (seconds)')}</label>
         <input type="number" name="POLL_INTERVAL" value="{interval}" min="10" max="3600">
 
-        <label>HTTP Port</label>
+        <label>{_t('HTTP Port')}</label>
         <input type="number" name="PORT" value="{port}" min="1" max="65535">
-        <div class="hint">Restart required after port change.</div>
+        <div class="hint">{_t('Restart required after port change.')}</div>
 
-        <button type="submit">💾 Save Settings</button>
+        <div class="section-title">{_t('Interface')}</div>
+        <label>{_t('Language')}</label>
+        <select name="LANGUAGE">{lang_opts}</select>
+
+        <button type="submit">💾 {_t('Save Settings')}</button>
       </form>
     </div>
 
     <div class="card">
-      <div class="label">API Endpoints –
-        <a href="/api" style="color:#3b82f6;font-size:.75rem;text-decoration:none">view live ↗</a>
+      <div class="label">{_t('API Endpoints')} –
+        <a href="/api" style="color:#3b82f6;font-size:.75rem;text-decoration:none">{_t('view live ↗')}</a>
       </div>
       <div class="meta-row">
         <span><a href="/" style="color:#3b82f6;text-decoration:none"><code>/</code></a></span>
-        <span class="meta-val">Status page</span>
+        <span class="meta-val">{_t('Status page')}</span>
       </div>
       <div class="meta-row">
         <span><a href="/api/health" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/health</code></a></span>
-        <span class="meta-val">Health check (JSON)</span>
+        <span class="meta-val">{_t('Health check (JSON)')}</span>
       </div>
     </div>
 
@@ -990,31 +1111,35 @@ def build_api_page():
 
     body = f"""
     <div class="card">
-      <div class="label">Endpoints</div>
+      <div class="label">{_t('Endpoints')}</div>
       <div class="meta-row">
         <span><a href="/" style="color:#3b82f6;text-decoration:none"><code>/</code></a></span>
-        <span class="meta-val">Status page (UI)</span>
+        <span class="meta-val">{_t('Status page (UI)')}</span>
       </div>
       <div class="meta-row">
         <span><a href="/settings" style="color:#3b82f6;text-decoration:none"><code>/settings</code></a></span>
-        <span class="meta-val">Settings (UI)</span>
+        <span class="meta-val">{_t('Settings (UI)')}</span>
       </div>
       <div class="meta-row">
         <span><a href="/api/health" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/health</code></a></span>
-        <span class="meta-val">Health check · JSON</span>
+        <span class="meta-val">{_t('Health check · JSON')}</span>
+      </div>
+      <div class="meta-row">
+        <span><a href="/api/raw" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/raw</code></a></span>
+        <span class="meta-val">{_t('Raw VRM values (debug)')}</span>
       </div>
     </div>
     <div class="card">
       <div class="label">GET /api/health – Live
         <a href="/api/health" target="_blank"
-           style="color:#3b82f6;font-size:.75rem;margin-left:.5rem;text-transform:none">open ↗</a>
+           style="color:#3b82f6;font-size:.75rem;margin-left:.5rem;text-transform:none">{_t('open ↗')}</a>
       </div>
       <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
                   color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(health_json)}</pre>
     </div>
     <div class="card">
       <div class="label">GET /api/1/vehicles/&lt;VIN&gt;/vehicle_data – Live
-        <span style="color:#475569;font-size:.72rem">(age: {age}s)</span>
+        <span style="color:#475569;font-size:.72rem">({_t('age: {age}s', age=age)})</span>
       </div>
       <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
                   color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(vehicle_json)}</pre>
@@ -1045,13 +1170,18 @@ def _parse_settings(params):
     site_id = params.get('VRM_SITE_ID', '').strip()
     if site_id:
         if not site_id.isdigit():
-            return {}, 'VRM Site ID must be numeric.'
+            return {}, _t('VRM Site ID must be numeric.')
         updates['VRM_SITE_ID'] = site_id
     bat_type = params.get('BATTERY_TYPE', '').strip()
     if bat_type:
         if bat_type not in BATTERY_PRESETS:
-            return {}, f'Unknown battery type: {bat_type}'
+            return {}, _t('Unknown battery type: {v}', v=bat_type)
         updates['BATTERY_TYPE'] = bat_type
+    language = params.get('LANGUAGE', '').strip()
+    if language:
+        if language not in LANGUAGES:
+            return {}, _t('Unknown language: {v}', v=language)
+        updates['LANGUAGE'] = language
     for key, (typ, lo, hi) in NUMERIC_SETTINGS.items():
         raw = params.get(key, '').strip()
         if not raw:
@@ -1061,12 +1191,12 @@ def _parse_settings(params):
         try:
             val = typ(raw)
         except ValueError:
-            return {}, f'{key}: "{raw}" is not a valid number.'
+            return {}, _t('{key}: "{raw}" is not a valid number.', key=key, raw=raw)
         if not lo <= val <= hi:
-            return {}, f'{key} must be between {lo} and {hi}.'
+            return {}, _t('{key} must be between {lo} and {hi}.', key=key, lo=lo, hi=hi)
         updates[key] = str(val)
     if int(updates.get('OPT_MIN', 0)) >= int(updates.get('OPT_MAX', 100)):
-        return {}, 'Optimal minimum must be lower than optimal maximum.'
+        return {}, _t('Optimal minimum must be lower than optimal maximum.')
     token = params.get('VRM_TOKEN', '').strip()
     if token:
         updates['VRM_TOKEN'] = token
@@ -1076,6 +1206,7 @@ def _parse_settings(params):
 class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+        _req.lang = _resolve_lang(self.headers.get('Accept-Language', ''))
         path = urlparse(self.path).path
         if path in ('/', '/status'):
             if not _is_configured():
@@ -1141,6 +1272,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404); self.end_headers()
 
     def do_POST(self):
+        _req.lang = _resolve_lang(self.headers.get('Accept-Language', ''))
         path = urlparse(self.path).path
         if path == '/settings':
             params = {k: v[0] for k, v in parse_qs(self._read_body().decode(errors='replace'), keep_blank_values=True).items()}
@@ -1158,6 +1290,7 @@ class Handler(BaseHTTPRequestHandler):
                             cfg[key] = val
                     _save_cfg(cfg)
                 print('[CFG] Settings saved.', flush=True)
+                _req.lang = _resolve_lang(self.headers.get('Accept-Language', ''))   # language may have changed
                 self._html(build_settings_page(saved=True))
             except Exception as exc:
                 self._html(build_settings_page(error_msg=str(exc)))
