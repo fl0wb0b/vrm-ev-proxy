@@ -59,6 +59,7 @@ Live-Log bestätigt: VRM liefert `Mgmt/Connection = 40` beim eingesteckten Tesla
 | R10 | Ladezyklen zählen jeden SoC-Anstieg, auch Schwankungen eines geparkten Autos | Zyklenzähler zu hoch | ✅ nur noch Anstiege im eingesteckten Zustand |
 | R11 | Sticky VIN nur im RAM | nach Neustart ohne VIN landen Verlauf/Statistik unter `EV_0` | ✅ letzte echte VIN pro Instanz in `settings.json` |
 | R12 | Healthcheck las nur `PORT` aus `.env` und galt bei VRM-Fehlern als fehlgeschlagen | `unhealthy`, obwohl der Proxy läuft | ✅ `app.py --healthcheck` liest auch `settings.json`, prüft nur Erreichbarkeit; zusätzlich `HEALTHCHECK` im Dockerfile |
+| R13 | SoC wurde seit v2.2 kaufmännisch gerundet statt abgeschnitten (VRM liefert z.B. `99.6`) | EVCC zeigt 100 %, Tesla/VRM 99 %; EVCC hält das Ladeziel für erreicht, Vollladung wird zu früh als erfolgt gespeichert | ✅ v2.4.1 schneidet ab wie die Tesla-App |
 
 ## Sicherheit
 
