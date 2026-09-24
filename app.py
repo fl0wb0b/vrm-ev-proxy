@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.4
+vrm-ev-proxy v2.4.1
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -15,7 +15,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.4"
+VERSION    = "2.4.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -333,7 +333,9 @@ def poll_vrm():
                     if evcs_status is not None:
                         # Live EVCS status beats the (possibly stale) vehicle API state
                         charging_state = EVCS_STATUS_MAP.get(int(_num(evcs_status, 1)), 'Stopped')
-                    soc           = max(0, min(100, int(round(_num(ev.get('/Soc'), 0)))))
+                    # Truncate like the Tesla app does: 99.6 % must stay 99 %, otherwise
+                    # EVCC sees 100 % (limit reached) and a full charge is logged too early.
+                    soc           = max(0, min(100, int(_num(ev.get('/Soc'), 0))))
                     range_km      = _num(ev.get('/RangeToGo'), 0)
                     limit_soc     = int(_num(ev.get('/TargetSoc'), 100)) or 100
                     max_current   = int(_num(ev.get('/Ac/MaxChargeCurrent'), 0)
