@@ -51,6 +51,7 @@ Everything is configured in the browser at `/settings` – no config files, no t
 |---------|--------------|
 | **VRM Token** | VRM Portal → avatar top right → Settings → API Tokens → Generate |
 | **VRM Site ID** | The number in your VRM URL: `vrm.victronenergy.com/installation/`**`12345`**`/dashboard` |
+| **Language** | Web UI in German or English – `Auto` follows the browser language |
 
 ---
 
