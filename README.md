@@ -61,6 +61,7 @@ Everything is configured in the browser at `/settings` – no config files, no t
 | `:8080/` | Live status: SoC, range, charging state, 7-day chart |
 | `:8080/settings` | All settings – change anytime without restart |
 | `:8080/api` | Live API responses |
+| `:8080/api/raw` | Raw VRM values of the EV and its charging station (debugging) |
 
 ---
 

@@ -27,6 +27,8 @@ Status: ✅ behoben · ⚠️ teilweise / mit Annahme · ⏭️ bewusst nicht ge
 | V6 | `/Ac/Energy/Forward` (Zählerstand kWh) wird ignoriert | Sitzungsenergie nur geschätzt (Leistung × Zeit bei 60-s-Polling) | ✅ Zählerdifferenz bevorzugt, Integration als Fallback |
 | V7 | `/AtSite = 0` (Auto nicht vor Ort) wird ignoriert | Auto unterwegs kann als „verbunden“ erscheinen | ✅ erzwingt „Disconnected“ |
 | V8 | Fahrzeugname nur aus `/CustomName` (nicht dokumentiert) | Anzeige der VIN statt „Brand Model“ | ✅ Fallback `/Brand` + `/Model` |
+| V9 | Tesla über VRM liefert keine Leistung (`Power=0.0W` bei `ChargingState 3`, im Live-Log bestätigt) | `charge_energy_added` und `minutes_to_full_charge` immer 0 | ✅ Werte kommen von der Ladestation (EVCS), auf die `Mgmt/Connection` zeigt: `/Ac/Power`, `/Session/Energy`, `/SetCurrent` |
+| V10 | Fahrzeugstatus kommt aus der Hersteller-API, die bei schlafendem Auto veraltet sein kann | EVCC sieht z.B. „Charging“, obwohl die Ladestation längst fertig ist | ✅ Live-`/Status` der Ladestation hat Vorrang (0 → Disconnected, 2 → Charging, 3 → Complete, sonst Stopped) |
 
 **Annahme bei V1:** Victron fasst „eingesteckt, lädt nicht“ und „nicht eingesteckt“ im Code `0` zusammen. Unterscheiden lässt sich das nur über `Mgmt/Connection` (EVCS, an der das Auto hängt). Mapping jetzt:
 
@@ -39,7 +41,7 @@ Status: ✅ behoben · ⚠️ teilweise / mit Annahme · ⏭️ bewusst nicht ge
 | 255 | Unavailable | `Disconnected` | A |
 | 2, 4, 5, 6 | undokumentiert (Altbestand) | wie bisher: 4 → `Complete`, sonst `Stopped` | B |
 
-Muss mit echten VRM-Rohdaten gegengeprüft werden (`/api` zeigt nur das Ergebnis, Rohwerte stehen im Log unter `[VRM] OK … raw=`).
+Live-Log bestätigt: VRM liefert `Mgmt/Connection = 40` beim eingesteckten Tesla. Rohwerte: Log `[VRM] OK … raw=` bzw. `GET /api/raw`.
 
 ## Robustheit
 
@@ -52,7 +54,11 @@ Muss mit echten VRM-Rohdaten gegengeprüft werden (`/api` zeigt nur das Ergebnis
 | R5 | Keine Validierung im Settings-Formular | Unsinnswerte landen in der Config | ✅ 9e98921 |
 | R6 | „Zeit über Optimum“ zählt nominales Intervall statt realer Zeit | Wert verfälscht bei Fehlern und Wartezeiten | ✅ 9e98921 |
 | R7 | Countdown bei Fehler zeigt feste Wartezeit statt Restzeit | Seite lädt zu spät/zu früh neu | ✅ |
-| R8 | Sitzungsenergie nur im RAM | nach Neustart beginnt `charge_energy_added` bei 0 | ⏭️ bei Zählerstand (V6) unkritisch, sonst akzeptiert |
+| R8 | Sitzungsenergie nur im RAM | nach Neustart beginnt `charge_energy_added` bei 0 | ✅ durch V9 erledigt (`/Session/Energy` der Ladestation) |
+| R9 | Veraltete Daten: bei VRM-Ausfall liefert der Proxy EVCC stundenlang den letzten SoC | EVCC plant mit falschem SoC | ✅ nach max(30 min, 10 × Intervall) ohne erfolgreiche Abfrage → HTTP 503, Health-Status `stale` |
+| R10 | Ladezyklen zählen jeden SoC-Anstieg, auch Schwankungen eines geparkten Autos | Zyklenzähler zu hoch | ✅ nur noch Anstiege im eingesteckten Zustand |
+| R11 | Sticky VIN nur im RAM | nach Neustart ohne VIN landen Verlauf/Statistik unter `EV_0` | ✅ letzte echte VIN pro Instanz in `settings.json` |
+| R12 | Healthcheck las nur `PORT` aus `.env` und galt bei VRM-Fehlern als fehlgeschlagen | `unhealthy`, obwohl der Proxy läuft | ✅ `app.py --healthcheck` liest auch `settings.json`, prüft nur Erreichbarkeit; zusätzlich `HEALTHCHECK` im Dockerfile |
 
 ## Sicherheit
 
