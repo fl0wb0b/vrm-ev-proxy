@@ -110,6 +110,8 @@ Both: color-coded SoC bar, 7-day history chart, charge cycle counter
 
 **No data showing** → check VRM Token and Site ID in `/settings`
 
+**Wrong times / dates on the status page** → set the `TZ` environment variable, e.g. `TZ=Europe/Berlin` (default in docker-compose)
+
 **`No EV device found`** → EV is not configured as a device in VRM
 
 **EVCC shows errors** → URL must be `http://<server-ip>` without port, port goes into the separate `port` field (otherwise EVCC calls `http://<ip>:8080:8080`)

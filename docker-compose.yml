@@ -12,6 +12,7 @@ services:
       - VRM_SITE_ID=${VRM_SITE_ID}
       - POLL_INTERVAL=${POLL_INTERVAL:-60}
       - PORT=${PORT:-8080}
+      - TZ=${TZ:-Europe/Berlin}   # local time for status page dates ("today", timestamps)
     healthcheck:
       test: ["CMD", "python", "/app/app.py", "--healthcheck"]
       interval: 60s
