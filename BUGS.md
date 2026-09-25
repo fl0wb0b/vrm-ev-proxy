@@ -60,6 +60,8 @@ Live-Log bestätigt: VRM liefert `Mgmt/Connection = 40` beim eingesteckten Tesla
 | R11 | Sticky VIN nur im RAM | nach Neustart ohne VIN landen Verlauf/Statistik unter `EV_0` | ✅ letzte echte VIN pro Instanz in `settings.json` |
 | R12 | Healthcheck las nur `PORT` aus `.env` und galt bei VRM-Fehlern als fehlgeschlagen | `unhealthy`, obwohl der Proxy läuft | ✅ `app.py --healthcheck` liest auch `settings.json`, prüft nur Erreichbarkeit; zusätzlich `HEALTHCHECK` im Dockerfile |
 | R13 | SoC wurde seit v2.2 kaufmännisch gerundet statt abgeschnitten (VRM liefert z.B. `99.6`) | EVCC zeigt 100 %, Tesla/VRM 99 %; EVCC hält das Ladeziel für erreicht, Vollladung wird zu früh als erfolgt gespeichert | ✅ v2.4.1 schneidet ab wie die Tesla-App |
+| R14 | „Letzte Vollladung“ wurde bei jeder Abfrage neu gesetzt, solange das Auto mit 100 % eingesteckt war; der Backfill nahm den letzten statt den ersten 100-%-Eintrag | gestern voll geladen → heute „Heute“ | ✅ v2.4.2: nur der Moment des Erreichens zählt, Backfill repariert falsche Werte beim Start |
+| R15 | „Heute/Gestern“ = weniger als 24/48 h statt Kalendertag; Container lief ohne `TZ` in UTC | 23:00 geladen → am Folgemorgen „Heute“, Datumsangaben 2 h verschoben | ✅ v2.4.2: Kalendertage, `TZ=Europe/Berlin` in docker-compose |
 
 ## Sicherheit
 

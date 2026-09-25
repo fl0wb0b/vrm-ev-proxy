@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.4.1
+vrm-ev-proxy v2.4.2
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
 """
 
+import datetime
 import html
 import json
 import os
@@ -15,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.4.1"
+VERSION    = "2.4.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -413,11 +414,14 @@ def poll_vrm():
                     }
 
                     # ── Track last full charge (per VIN) ──────────────────────────
-                    lfc_key = f'last_full_charge_{vin}'
-                    if soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped'):
-                        if now - cfg.get(lfc_key, 0) > 3600:
-                            print(f'[VRM] Full charge detected for {vin} – timestamp saved.', flush=True)
+                    # Record the moment 100 % is reached – not every poll while the car
+                    # sits at 100 % plugged in (that kept moving the date to "today").
+                    lfc_key  = f'last_full_charge_{vin}'
+                    prev_soc = cfg.get(f'last_soc_for_cycles_{vin}')
+                    if (soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped')
+                            and (prev_soc is None or prev_soc < 100)):
                         cfg[lfc_key] = now
+                        print(f'[VRM] Full charge reached for {vin} – timestamp saved.', flush=True)
 
                     # ── SoC history (hourly snapshots, per VIN) ────────────────────
                     hist_key = f'soc_history_{vin}'
@@ -777,10 +781,11 @@ def build_status_page():
             lfc_key = f'last_full_charge_{vin}'
             last_full = cfg.get(lfc_key, 0)
             if last_full:
-                days_ago = (time.time() - last_full) / 86400
-                if days_ago < 1:     lf_str = _t('Today')
-                elif days_ago < 2:   lf_str = _t('Yesterday')
-                else:                lf_str = _t('{d}d ago ({date})', d=int(days_ago),
+                # Calendar days, not 24 h blocks: 23:00 yesterday is "yesterday" at 08:00
+                days_ago = (datetime.date.today() - datetime.date.fromtimestamp(last_full)).days
+                if days_ago <= 0:    lf_str = _t('Today')
+                elif days_ago == 1:  lf_str = _t('Yesterday')
+                else:                lf_str = _t('{d}d ago ({date})', d=days_ago,
                                                  date=time.strftime("%d.%m.%Y", time.localtime(last_full)))
             else:
                 lf_str = _t('Not recorded yet')
@@ -1343,9 +1348,22 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+def _full_charge_run(history):
+    """(first_ts, last_ts) of the most recent run of >= 100 % snapshots, or None."""
+    run = None
+    prev_full = False
+    for ts, soc in history:
+        full = soc >= 100
+        if full:
+            run = (ts, ts) if not prev_full else (run[0], ts)
+        prev_full = full
+    return run
+
+
 def _backfill_last_full_charge():
-    """On startup: scan SoC history and set last_full_charge if a 100% entry exists
-    but no timestamp is recorded yet (or the history entry is more recent)."""
+    """On startup: derive last_full_charge from the SoC history – the start of the
+    latest 100 % run. Also repairs timestamps that older versions kept moving
+    forward while the car sat at 100 %."""
     cfg = _load_cfg()
     changed = False
     for key, value in list(cfg.items()):
@@ -1354,13 +1372,14 @@ def _backfill_last_full_charge():
         vin = key[len('soc_history_'):]
         lfc_key = f'last_full_charge_{vin}'
         history = value  # list of [ts, soc]
-        # Find most recent 100% entry
-        full_entries = [ts for ts, soc in history if soc >= 100]
-        if not full_entries:
+        run = _full_charge_run(history)
+        if not run:
             continue
-        best_ts = max(full_entries)
+        best_ts, run_end = run
         existing = cfg.get(lfc_key, 0)
-        if best_ts > existing:
+        # Older than the run → missed. Inside the run → moved forward by the old
+        # "update every poll" bug. After the run → a real newer full charge, keep.
+        if existing < best_ts or best_ts < existing <= run_end + 3600:
             cfg[lfc_key] = best_ts
             print(f'[startup] Backfilled last_full_charge for {vin}: '
                   f'{time.strftime("%Y-%m-%d %H:%M", time.localtime(best_ts))}', flush=True)
