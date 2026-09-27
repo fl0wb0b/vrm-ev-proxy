@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.4.3
+vrm-ev-proxy v2.5.0
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.4.3"
+VERSION    = "2.5.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -94,6 +94,46 @@ def _station_owners(by_instance):
             best[station] = (rank, inst)
     return {station: inst for station, (_, inst) in best.items()}
 
+def _evcc_redetect(station, reason):
+    """Ask EVCC to identify the vehicle on the configured loadpoint again."""
+    url = str(_get('EVCC_URL')).rstrip('/')
+    lp  = _get_int('EVCC_LOADPOINT', 1)
+    def run():
+        try:
+            req = Request(f'{url}/api/loadpoints/{lp}/vehicle', method='PATCH')
+            with urlopen(req, timeout=10) as resp:
+                print(f'[EVCC] Vehicle detection restarted on loadpoint {lp} ({reason}) – HTTP {resp.status}', flush=True)
+        except Exception as exc:
+            print(f'[EVCC] Vehicle detection restart on loadpoint {lp} failed ({reason}): {exc}', flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+def _check_owner_changes(owners, by_instance, inst_vins):
+    """Restart EVCC vehicle detection when another EV starts charging at a station.
+
+    EVCC re-identifies the vehicle only after the charger reported 'disconnected'
+    (status A). A quick swap between two cars falls between two EVCC polls, so
+    EVCC keeps the previous car on the loadpoint. Only EVs that report activity
+    themselves count – idle EVs swapping ownership via last contact are ignored.
+    """
+    now = time.time()
+    for station, inst in owners.items():
+        if int(_num(by_instance[inst].get('/ChargingState'), 0)) in (0, 1, 255):
+            continue
+        vin = inst_vins.get(inst)
+        enabled = bool(_get('EVCC_URL'))
+        with _lock:
+            prev = _cache['active_owners'].get(station)
+            if prev == vin:
+                continue
+            cooling = now - _cache['evcc_redetect_ts'].get(station, 0) < EVCC_REDETECT_COOLDOWN
+            if prev is not None and enabled and cooling:
+                continue   # keep prev → retried once the cooldown is over
+            _cache['active_owners'][station] = vin
+            if prev is None or not enabled:
+                continue   # first sighting after start, or feature off
+            _cache['evcc_redetect_ts'][station] = now
+        _evcc_redetect(station, f'{prev} → {vin}')
+
 def _find_evcs(records, connection):
     """Return (device_name, {dbusPath: rawValue}) of the EVCS the EV is plugged into."""
     inst = _evcs_instance(connection)
@@ -124,7 +164,10 @@ _cache = {
     'next_poll_at': 0.0,  # absolute time of the next VRM poll
     'sticky_vins': {},  # inst -> {'vin': str, 'ts': float}
     'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
+    'active_owners': {},     # EVCS instance -> VIN of the last EV charging there
+    'evcc_redetect_ts': {},  # EVCS instance -> time of the last EVCC re-detection
 }
+EVCC_REDETECT_COOLDOWN = 300  # seconds between EVCC re-detections per station
 STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
 _lock     = threading.Lock()
 _cfg_lock = threading.RLock()   # serialises read-modify-write of CONFIG_FILE
@@ -138,6 +181,7 @@ NUMERIC_SETTINGS = {
     'OPT_MIN':            (int,   0,  50),
     'OPT_MAX':            (int,   50, 100),
     'FULL_REMINDER_DAYS': (int,   7,  90),
+    'EVCC_LOADPOINT':     (int,   1,  99),
 }
 
 # ── Web UI language (GUI only – logs, API and EVCC fields stay English) ────────
@@ -206,6 +250,13 @@ _DE = {
         'Erinnerung, wenn so viele Tage nicht voll geladen wurde (nur LFP)',
     'Polling': 'Abfrage', 'Poll Interval (seconds)': 'Abfrageintervall (Sekunden)',
     'HTTP Port': 'HTTP-Port', 'Restart required after port change.': 'Nach Portänderung Neustart nötig.',
+    'EVCC Vehicle Detection': 'EVCC-Fahrzeugerkennung', 'EVCC URL': 'EVCC-URL',
+    'e.g. http://192.168.1.10:7070': 'z.B. http://192.168.1.10:7070',
+    'When another EV starts charging at the station, EVCC is told to identify the vehicle again. Leave empty to disable.':
+        'Beginnt ein anderes Auto an der Ladestation zu laden, startet EVCC die Fahrzeugerkennung neu. Leer lassen zum Deaktivieren.',
+    'EVCC Loadpoint Number': 'EVCC-Ladepunkt-Nummer',
+    'Position of the loadpoint in EVCC, starting at 1': 'Position des Ladepunkts in EVCC, beginnend bei 1',
+    'EVCC URL must start with http:// or https://.': 'Die EVCC-URL muss mit http:// oder https:// beginnen.',
     'Interface': 'Oberfläche', 'Language': 'Sprache',
     'Save Settings': 'Einstellungen speichern',
     'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
@@ -342,6 +393,7 @@ def poll_vrm():
             opt_max  = _get_int('OPT_MAX', bat['opt_max'])
             vehicles = {}
             owners   = _station_owners(by_instance)
+            inst_vins = {}
 
             with _cfg_lock:
                 cfg = _load_cfg()
@@ -401,6 +453,7 @@ def poll_vrm():
                         vin = cfg[f'vin_inst_{inst}']
                     if raw_vin:
                         cfg[f'vin_inst_{inst}'] = raw_vin
+                    inst_vins[inst] = vin
 
                     # ── Session energy ─────────────────────────────────────────────
                     # EVCC queries charge_energy_added; a missing field makes its jq
@@ -506,6 +559,8 @@ def poll_vrm():
                           flush=True)
 
                 _save_cfg(cfg)
+
+            _check_owner_changes(owners, by_instance, inst_vins)
 
             with _lock:
                 _cache['vehicles']    = vehicles
@@ -1004,12 +1059,14 @@ def build_settings_page(saved=False, error_msg=''):
     opt_max  = cfg.get('OPT_MAX') or os.environ.get('OPT_MAX', str(bat['opt_max']))
     reminder = cfg.get('FULL_REMINDER_DAYS') or os.environ.get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
+    evcc_url = cfg.get('EVCC_URL') or os.environ.get('EVCC_URL', '')
+    evcc_lp  = cfg.get('EVCC_LOADPOINT') or os.environ.get('EVCC_LOADPOINT', '1')
     language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
     lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
                         for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
-    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked = map(
-        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked))
+    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, evcc_lp = map(
+        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, evcc_lp))
 
     lfp_sel = 'selected' if bat_type == 'LFP' else ''
     nmc_sel = 'selected' if bat_type == 'NMC' else ''
@@ -1089,6 +1146,15 @@ def build_settings_page(saved=False, error_msg=''):
         <label>{_t('HTTP Port')}</label>
         <input type="number" name="PORT" value="{port}" min="1" max="65535">
         <div class="hint">{_t('Restart required after port change.')}</div>
+
+        <div class="section-title">{_t('EVCC Vehicle Detection')}</div>
+        <label>{_t('EVCC URL')}</label>
+        <input type="text" name="EVCC_URL" value="{evcc_url}" placeholder="{_t('e.g. http://192.168.1.10:7070')}">
+        <div class="hint">{_t('When another EV starts charging at the station, EVCC is told to identify the vehicle again. Leave empty to disable.')}</div>
+
+        <label>{_t('EVCC Loadpoint Number')}</label>
+        <input type="number" name="EVCC_LOADPOINT" value="{evcc_lp}" min="1" max="99">
+        <div class="hint">{_t('Position of the loadpoint in EVCC, starting at 1')}</div>
 
         <div class="section-title">{_t('Interface')}</div>
         <label>{_t('Language')}</label>
@@ -1237,6 +1303,11 @@ def _parse_settings(params):
         updates[key] = str(val)
     if int(updates.get('OPT_MIN', 0)) >= int(updates.get('OPT_MAX', 100)):
         return {}, _t('Optimal minimum must be lower than optimal maximum.')
+    if 'EVCC_URL' in params:
+        evcc_url = params['EVCC_URL'].strip().rstrip('/')
+        if evcc_url and not evcc_url.startswith(('http://', 'https://')):
+            return {}, _t('EVCC URL must start with http:// or https://.')
+        updates['EVCC_URL'] = evcc_url or None   # cleared → feature off
     token = params.get('VRM_TOKEN', '').strip()
     if token:
         updates['VRM_TOKEN'] = token

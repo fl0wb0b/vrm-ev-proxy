@@ -90,6 +90,12 @@ The proxy serves all fields the template reads from `charge_state`: `battery_lev
 
 Known bugs and their status: [BUGS.md](BUGS.md)
 
+### Several EVs on one charging station
+
+VRM keeps the station link (`/Mgmt/Connection`) of a car that has left, so several EVs can point at the same station. Only one of them gets the station's status, power and session energy: the one that reports charging activity itself, otherwise the most recently seen one. All others are reported as `Disconnected`.
+
+EVCC only identifies the vehicle again after the charger reported "disconnected". A quick swap between two cars is missed, and EVCC keeps the previous car on the loadpoint. Set **EVCC URL** (e.g. `http://192.168.1.10:7070`) and **EVCC Loadpoint Number** in `/settings`: when another EV starts charging at the station, the proxy calls `PATCH /api/loadpoints/<n>/vehicle` and EVCC picks the right car by its status (at most once per 5 minutes per station). If your EVCC API requires a login, this call fails and is logged as `[EVCC] … failed`.
+
 > **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
 ---
