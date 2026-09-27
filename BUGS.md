@@ -29,6 +29,7 @@ Status: ✅ behoben · ⚠️ teilweise / mit Annahme · ⏭️ bewusst nicht ge
 | V8 | Fahrzeugname nur aus `/CustomName` (nicht dokumentiert) | Anzeige der VIN statt „Brand Model“ | ✅ Fallback `/Brand` + `/Model` |
 | V9 | Tesla über VRM liefert keine Leistung (`Power=0.0W` bei `ChargingState 3`, im Live-Log bestätigt) | `charge_energy_added` und `minutes_to_full_charge` immer 0 | ✅ Werte kommen von der Ladestation (EVCS), auf die `Mgmt/Connection` zeigt: `/Ac/Power`, `/Session/Energy`, `/SetCurrent` |
 | V10 | Fahrzeugstatus kommt aus der Hersteller-API, die bei schlafendem Auto veraltet sein kann | EVCC sieht z.B. „Charging“, obwohl die Ladestation längst fertig ist | ✅ Live-`/Status` der Ladestation hat Vorrang (0 → Disconnected, 2 → Charging, 3 → Complete, sonst Stopped) |
+| V11 | VRM behält `Mgmt/Connection` eines weggefahrenen Autos. Zeigen zwei EVs auf dieselbe Ladestation, bekamen beide deren `/Status`, `/Ac/Power` und `/Session/Energy` (live bestätigt: XP7 `ChargingState 0`, letzter Kontakt vor 5,6 h, trotzdem „Lädt 11,2 kW“) | EVCC/Statusseite zeigen beide Autos ladend mit identischer Leistung und Energie | ✅ v2.4.3: pro Ladestation bekommt nur ein EV die EVCS-Werte – das mit eigenem aktivem `ChargingState`, sonst das zuletzt gesehene (`/LastUpdated/EvContact`); die anderen gelten als nicht eingesteckt (`Disconnected`, 0 W, Sitzung 0) |
 
 **Annahme bei V1:** Victron fasst „eingesteckt, lädt nicht“ und „nicht eingesteckt“ im Code `0` zusammen. Unterscheiden lässt sich das nur über `Mgmt/Connection` (EVCS, an der das Auto hängt). Mapping jetzt:
 

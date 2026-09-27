@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.4.2
+vrm-ev-proxy v2.4.3
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.4.2"
+VERSION    = "2.4.3"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -43,12 +43,13 @@ CHARGING_STATE_MAP = {
     2: 'Stopped', 4: 'Complete', 5: 'Stopped', 6: 'Stopped',
 }
 
-def _charging_state(ev):
+def _charging_state(ev, plugged=None):
     """Map VRM EV values to a Tesla charging_state."""
     code  = int(_num(ev.get('/ChargingState'), 0))
     state = CHARGING_STATE_MAP.get(code, 'Disconnected')
     # Mgmt/Connection names the EVCS the EV is plugged into (e.g. 'evcharger:40')
-    plugged = bool(ev.get('/Mgmt/Connection') or ev.get('Mgmt/Connection'))
+    if plugged is None:
+        plugged = bool(_connection(ev))
     if code in (0, 1) and plugged:
         state = 'Stopped'
     # AtSite 0 = EV is not at this installation → can't be connected here
@@ -69,9 +70,33 @@ EVCS_STATUS_MAP = {0: 'Disconnected', 2: 'Charging', 3: 'Complete'}
 def _connection(ev):
     return ev.get('/Mgmt/Connection') or ev.get('Mgmt/Connection') or ''
 
+def _evcs_instance(connection):
+    return int(_num(str(connection).split(':')[-1], -1))
+
+def _station_owners(by_instance):
+    """Map EVCS instance -> EV instance that is actually plugged into it.
+
+    VRM keeps /Mgmt/Connection of a car that has left, so several EVs can point
+    at the same station – but only one can be plugged in. Prefer the EV that
+    reports activity itself (ChargingState not 0/1/255), then the most recently
+    seen one (/LastUpdated/EvContact).
+    """
+    best = {}
+    for inst, ev in by_instance.items():
+        station = _evcs_instance(_connection(ev))
+        if station < 0 or _num(ev.get('/AtSite'), 1) == 0:
+            continue
+        code   = int(_num(ev.get('/ChargingState'), 0))
+        active = code not in (0, 1, 255)
+        seen   = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact'), 0)
+        rank   = (active, seen)
+        if station not in best or rank > best[station][0]:
+            best[station] = (rank, inst)
+    return {station: inst for station, (_, inst) in best.items()}
+
 def _find_evcs(records, connection):
     """Return (device_name, {dbusPath: rawValue}) of the EVCS the EV is plugged into."""
-    inst = int(_num(str(connection).split(':')[-1], -1))
+    inst = _evcs_instance(connection)
     if inst < 0:
         return None, {}
     devices = {}
@@ -316,6 +341,7 @@ def poll_vrm():
             bat      = _bat()
             opt_max  = _get_int('OPT_MAX', bat['opt_max'])
             vehicles = {}
+            owners   = _station_owners(by_instance)
 
             with _cfg_lock:
                 cfg = _load_cfg()
@@ -328,8 +354,12 @@ def poll_vrm():
                     brand_model = ' '.join(str(ev.get(k) or '') for k in ('/Brand', '/Model')).strip()
                     custom_name = str(ev.get('/CustomName') or '') or brand_model or vin
 
-                    charging_raw, charging_state = _charging_state(ev)
-                    evcs_name, evcs = _find_evcs(records, _connection(ev))
+                    # Another EV owns the shared station → this one isn't plugged in and
+                    # must not inherit that station's status, power and session energy.
+                    station = _evcs_instance(_connection(ev))
+                    not_plugged = station >= 0 and owners.get(station, inst) != inst
+                    charging_raw, charging_state = _charging_state(ev, plugged=False if not_plugged else None)
+                    evcs_name, evcs = (None, {}) if not_plugged else _find_evcs(records, _connection(ev))
                     evcs_status = evcs.get('/Status')
                     if evcs_status is not None:
                         # Live EVCS status beats the (possibly stale) vehicle API state
@@ -378,7 +408,9 @@ def poll_vrm():
                     # Prefer the /Ac/Energy/Forward meter, else integrate power.
                     with _lock:
                         sess = _cache['sessions'].get(inst) or {'energy_kwh': 0.0, 'state': 'Disconnected'}
-                        if sess['state'] == 'Disconnected' and charging_state != 'Disconnected':
+                        if not_plugged and charging_state == 'Disconnected':
+                            sess = {'energy_kwh': 0.0, 'state': 'Disconnected'}  # drop the other EV's session
+                        elif sess['state'] == 'Disconnected' and charging_state != 'Disconnected':
                             sess = {'energy_kwh': 0.0, 'state': charging_state}   # new plug-in → new session
                         if evcs_session is not None:
                             sess['energy_kwh'] = evcs_session
@@ -469,7 +501,8 @@ def poll_vrm():
                     print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
                           f'State={charging_state}  Power={power_w}W  raw=ChargingState:{charging_raw}'
                           f' Connection:{_connection(ev) or "-"} AtSite:{ev.get("/AtSite", "-")}'
-                          f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}',
+                          f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}'
+                          f'{" (station owned by other EV)" if not_plugged else ""}',
                           flush=True)
 
                 _save_cfg(cfg)
