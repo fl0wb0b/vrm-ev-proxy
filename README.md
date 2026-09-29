@@ -96,6 +96,14 @@ VRM keeps the station link (`/Mgmt/Connection`) of a car that has left, so sever
 
 EVCC only identifies the vehicle again after the charger reported "disconnected". A quick swap between two cars is missed, and EVCC keeps the previous car on the loadpoint. Set **EVCC URL** (e.g. `http://192.168.1.10:7070`) in `/settings` to fix this live, for any number of loadpoints and without mapping: while one of the proxy's EVs is charging, the proxy reads EVCC's `/api/state`. A charging loadpoint whose vehicle – recognised by its range, which EVCC takes from this proxy – is `Disconnected` here gets `PATCH /api/loadpoints/<n>/vehicle`, and EVCC picks the right car by its status (at most once per 5 minutes per loadpoint; skipped if the range matches no or several EVs). If your EVCC API requires a login, this fails and is logged as `[EVCC] … failed`.
 
+### Periodic full charge from PV (LFP balancing)
+
+Set **Full charge from PV every (days)** in `/settings` (0 = off, needs **EVCC URL**). A car is due that many days after the proxy last recorded 100 % for it. Every 5 minutes the proxy checks EVCC's solar forecast: if the surplus left today – forecast minus **base load** (default 1500 W), capped at what the car's loadpoint can take (a switched socket: `minCurrent`), 80 % of it trusted – covers the energy up to 100 %, the proxy sets that vehicle's EVCC limit to 100 % (`POST /api/vehicles/<name>/limitsoc/100`). The previous limit comes back once 100 % is reached, when the PV day is over, or when the feature is turned off.
+
+Full charges only start on loadpoints that take at least **Minimum loadpoint power** (default 4000 W, a switched socket counts with its `minCurrent`): at 2.3 kW a car loses roughly 15–35 % (100–400 W own consumption while charging plus the slow top-off near 100 %), a 3-phase wallbox about 7–10 % (ADAC and others). If a car only ever charges on a slow loadpoint, it still gets its full charge there once it is twice as overdue (e.g. after 14 days with 7). Tesla recommends a full charge of LFP packs at least weekly – **7 days** is the manufacturer value; a car should not sit at 100 % for days, which is why the limit goes back right after reaching it.
+
+Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then. The EVCC vehicle of each VIN is learned from a loadpoint showing that car (matched by range), so the car has to be plugged in and identified once.
+
 > **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
 ---
