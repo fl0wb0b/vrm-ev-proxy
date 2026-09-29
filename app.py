@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.6.0
+vrm-ev-proxy v2.7.0
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.6.0"
+VERSION    = "2.7.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -162,6 +162,32 @@ def _find_evcs(records, connection):
         if EVCS_MARKER_PATHS & values.keys():
             return name, values
     return None, {}
+
+def _evcs_idle_since(station, status, now):
+    """Time the station's /Status turned 0 – 0 if it was already 0 at startup."""
+    with _lock:
+        prev = _cache['evcs_status'].get(station)
+        if prev is None:
+            since = 0 if status == 0 else now
+        elif prev[0] != status:
+            since = now
+        else:
+            since = prev[1]
+        _cache['evcs_status'][station] = (status, since)
+    return since
+
+def _charging_away(code, evcs_status, charging_ts, idle_since, now):
+    """True if the car charges somewhere else than at the station VRM links it to.
+
+    VRM keeps /Mgmt/Connection while the car charges elsewhere (e.g. from a
+    switched socket), so the idle station's /Status 0 would hide the car's own
+    ChargingState 3. Trust the car if it reported charging after the station went
+    idle and recently – a stale report from before the unplug doesn't count.
+    """
+    return (code == 3 and evcs_status == 0
+            and charging_ts > idle_since
+            and now - charging_ts < AWAY_CHARGE_MAX_AGE)
+
 CHARGING_STATE_UI = {
     'Disconnected': ('🔌', 'Disconnected', '#6b7280'),
     'Stopped':      ('⏸',  'Connected',    '#f59e0b'),
@@ -179,9 +205,11 @@ _cache = {
     'sticky_vins': {},  # inst -> {'vin': str, 'ts': float}
     'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
     'evcc_redetect_ts': {},  # EVCC loadpoint -> time of the last vehicle re-detection
+    'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
 }
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
+AWAY_CHARGE_MAX_AGE     = 900  # seconds a car's own 'charging' report counts away from its station
 STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
 _lock     = threading.Lock()
 _cfg_lock = threading.RLock()   # serialises read-modify-write of CONFIG_FILE
@@ -423,9 +451,18 @@ def poll_vrm():
                     charging_raw, charging_state = _charging_state(ev, plugged=False if not_plugged else None)
                     evcs_name, evcs = (None, {}) if not_plugged else _find_evcs(records, _connection(ev))
                     evcs_status = evcs.get('/Status')
+                    away = False
                     if evcs_status is not None:
-                        # Live EVCS status beats the (possibly stale) vehicle API state
-                        charging_state = EVCS_STATUS_MAP.get(int(_num(evcs_status, 1)), 'Stopped')
+                        status_code = int(_num(evcs_status, 1))
+                        charging_ts = _num(ev.get('/LastUpdated/Charging') or ev.get('LastUpdated/Charging'), 0)
+                        away = _charging_away(charging_raw, status_code, charging_ts,
+                                              _evcs_idle_since(station, status_code, now), now)
+                        if away:
+                            # Charging elsewhere: the station's power and session aren't this car's
+                            evcs_name, evcs = None, {}
+                        else:
+                            # Live EVCS status beats the (possibly stale) vehicle API state
+                            charging_state = EVCS_STATUS_MAP.get(status_code, 'Stopped')
                     # Truncate like the Tesla app does: 99.6 % must stay 99 %, otherwise
                     # EVCC sees 100 % (limit reached) and a full charge is logged too early.
                     soc           = max(0, min(100, int(_num(ev.get('/Soc'), 0))))
@@ -435,6 +472,11 @@ def poll_vrm():
                                         or _num(evcs.get('/SetCurrent'), 0) or 16)
                     power_w       = (_num(ev.get('/Ac/Power'), 0) or _num(ev.get('/Dc/Power'), 0)
                                      or _num(evcs.get('/Ac/Power'), 0))
+                    ac_volts      = _num(ev.get('/Ac/Voltage'), 0)
+                    if not power_w and charging_state == 'Charging' and ac_volts > 100:
+                        # No station to ask (charging away) – the car still reports V, A and phases
+                        power_w = (ac_volts * _num(ev.get('/Ac/Current'), 0)
+                                   * max(1, int(_num(ev.get('/Ac/NumberOfPhases'), 1))))
                     energy_total  = ev.get('/Ac/Energy/Forward')
                     energy_total  = _num(energy_total, None) if energy_total is not None else None
                     evcs_session  = evcs.get('/Session/Energy')
@@ -564,7 +606,8 @@ def poll_vrm():
                           f'State={charging_state}  Power={power_w}W  raw=ChargingState:{charging_raw}'
                           f' Connection:{_connection(ev) or "-"} AtSite:{ev.get("/AtSite", "-")}'
                           f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}'
-                          f'{" (station owned by other EV)" if not_plugged else ""}',
+                          f'{" (station owned by other EV)" if not_plugged else ""}'
+                          f'{" (charging away from station)" if away else ""}',
                           flush=True)
 
                 _save_cfg(cfg)
