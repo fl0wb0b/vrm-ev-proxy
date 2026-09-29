@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.7.0
+vrm-ev-proxy v2.8.0
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.7.0"
+VERSION    = "2.8.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -148,6 +148,117 @@ def _check_evcc_loadpoints(vehicles):
             _cache['evcc_redetect_ts'][lp] = now
         _evcc_redetect(url, lp, f'shows {point.get("vehicleTitle") or vin} = {vin}, not plugged in')
 
+# ── Periodic full charge from PV (LFP balancing) ───────────────────────────────
+# Due every FULL_CHARGE_DAYS after the last recorded 100 %. On a day whose solar
+# forecast covers the missing energy, EVCC's limit of that vehicle goes to 100 %;
+# it is restored once 100 % is reached or the PV day is over. The limit alone never
+# draws grid power – plans and cheap-tariff charging are left untouched.
+FULL_CHARGE_CHECK_EVERY = 300    # seconds between evaluations
+FULL_CHARGE_PV_MARGIN   = 0.8    # share of the forecast surplus that is trusted
+FULL_CHARGE_LOSSES      = 0.9    # charging efficiency
+FULL_CHARGE_DAY_OVER_KWH = 0.5   # less surplus left today → the PV day is over
+
+def _evcc_post(url, path, method='POST'):
+    with urlopen(Request(f'{url}/api/{path}', method=method), timeout=5) as resp:
+        return resp.status
+
+def _loadpoint_max_w(point):
+    """Power the loadpoint can take: a switched socket draws a fixed minCurrent."""
+    phases = int(_num(point.get('phasesActive'), 0)) or (1 if point.get('chargerSinglePhase') else 3)
+    amps = point.get('minCurrent') if point.get('chargerFeatureSwitchDevice') else point.get('maxCurrent')
+    return _num(amps, 16) * phases * 230
+
+def _pv_surplus_today_kwh(state, now, max_w, base_w):
+    """Solar surplus (forecast minus base load, capped at max_w) left today, in kWh."""
+    series = ((state.get('forecast') or {}).get('solar') or {}).get('timeseries') or []
+    points = []
+    for entry in series:
+        if isinstance(entry, dict):
+            ts = entry.get('ts')
+            ts = datetime.datetime.fromisoformat(ts).timestamp() if isinstance(ts, str) else _num(ts, 0)
+            points.append((ts, _num(entry.get('val'), 0)))
+        else:
+            points.append((_num(entry[0], 0), _num(entry[1], 0)))
+    midnight = (datetime.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+                + datetime.timedelta(days=1)).timestamp()
+    step = points[1][0] - points[0][0] if len(points) > 1 else 900
+    wh = sum(min(max(0.0, w - base_w), max_w) * step / 3600
+             for ts, w in points if now - step < ts < midnight)
+    return wh / 1000 * FULL_CHARGE_PV_MARGIN
+
+def _full_charge_pv(vehicles):
+    days = _get_int('FULL_CHARGE_DAYS', 0)
+    url  = str(_get('EVCC_URL')).rstrip('/')
+    now  = time.time()
+    if not url or (days <= 0 and not any(k.startswith('full_charge_') and not k.startswith('full_charge_ref_')
+                                         for k in _load_cfg())):
+        return
+    with _lock:
+        if now - _cache['full_charge_ts'] < FULL_CHARGE_CHECK_EVERY:
+            return
+        _cache['full_charge_ts'] = now
+    try:
+        with urlopen(Request(f'{url}/api/state'), timeout=5) as resp:
+            state = json.loads(resp.read())
+        state = state.get('result', state)
+    except Exception as exc:
+        print(f'[FULL] EVCC state query failed: {exc}', flush=True)
+        return
+    evcc_vehicles = state.get('vehicles') or {}
+    points = state.get('loadpoints') or []
+    base_w = _get_int('FULL_CHARGE_BASE_LOAD', 1500)
+    today  = datetime.date.fromtimestamp(now).isoformat()
+
+    with _cfg_lock:
+        cfg = _load_cfg()
+        # Learn which EVCC vehicle is which VIN from loadpoints showing a car
+        for point in points:
+            name = point.get('vehicleName')
+            vin = _match_vin(_num(point.get('vehicleRange'), 0), vehicles) if name else None
+            if vin and name in evcc_vehicles:
+                cfg[f'evcc_vehicle_{vin}'] = name
+
+        for vin, veh in vehicles.items():
+            name = cfg.get(f'evcc_vehicle_{vin}')
+            if name not in evcc_vehicles:
+                continue
+            title = evcc_vehicles[name].get('title') or name
+            soc = veh['data']['battery_level']
+            last_full = cfg.get(f'last_full_charge_{vin}') or cfg.setdefault(f'full_charge_ref_{vin}', now)
+            active = cfg.get(f'full_charge_{vin}')
+            point = next((p for p in points if p.get('vehicleName') == name and p.get('connected')), None)
+            max_w = _loadpoint_max_w(point) if point else 0
+            try:
+                if active:
+                    surplus = _pv_surplus_today_kwh(state, now, max_w or 11000, base_w)
+                    if days <= 0:
+                        reason = 'turned off'
+                    elif soc >= 100 or cfg.get(f'last_full_charge_{vin}', 0) > active['since']:
+                        reason = '100 % reached'
+                    elif active['day'] != today or surplus < FULL_CHARGE_DAY_OVER_KWH:
+                        reason = f'PV day over at {soc} %, next try on the next sunny day'
+                    else:
+                        continue
+                    if active.get('restore'):
+                        _evcc_post(url, f'vehicles/{name}/limitsoc/{active["restore"]}')
+                    del cfg[f'full_charge_{vin}']
+                    print(f'[FULL] {title}: {reason} – EVCC limit back to {active.get("restore")} %', flush=True)
+                elif days > 0 and (now - last_full) / 86400 >= days and point and soc < 100:
+                    need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
+                    surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
+                    if surplus < need:
+                        continue
+                    limit = int(_num(evcc_vehicles[name].get('limitSoc'), 0))
+                    if limit != 100:
+                        _evcc_post(url, f'vehicles/{name}/limitsoc/100')
+                    cfg[f'full_charge_{vin}'] = {'since': now, 'day': today,
+                                                 'restore': limit if 0 < limit < 100 else None}
+                    print(f'[FULL] {title}: last 100 % {int((now - last_full) / 86400)} days ago, PV today '
+                          f'{surplus:.1f} kWh ≥ {need:.1f} kWh needed – EVCC limit {limit} → 100 %', flush=True)
+            except Exception as exc:
+                print(f'[FULL] {title}: EVCC call failed: {exc}', flush=True)
+        _save_cfg(cfg)
+
 def _find_evcs(records, connection):
     """Return (device_name, {dbusPath: rawValue}) of the EVCS the EV is plugged into."""
     inst = _evcs_instance(connection)
@@ -206,6 +317,7 @@ _cache = {
     'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
     'evcc_redetect_ts': {},  # EVCC loadpoint -> time of the last vehicle re-detection
     'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
+    'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
 }
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
@@ -223,6 +335,8 @@ NUMERIC_SETTINGS = {
     'OPT_MIN':            (int,   0,  50),
     'OPT_MAX':            (int,   50, 100),
     'FULL_REMINDER_DAYS': (int,   7,  90),
+    'FULL_CHARGE_DAYS':   (int,   0,  60),
+    'FULL_CHARGE_BASE_LOAD': (int, 0, 20000),
 }
 
 # ── Web UI language (GUI only – logs, API and EVCC fields stay English) ────────
@@ -296,6 +410,15 @@ _DE = {
     'If an EVCC loadpoint keeps showing a car that is no longer plugged in, EVCC is told to identify the vehicle again. Loadpoints are detected automatically. Leave empty to disable.':
         'Zeigt ein EVCC-Ladepunkt ein Auto, das nicht mehr eingesteckt ist, startet EVCC die Fahrzeugerkennung neu. Ladepunkte werden automatisch erkannt. Leer lassen zum Deaktivieren.',
     'EVCC URL must start with http:// or https://.': 'Die EVCC-URL muss mit http:// oder https:// beginnen.',
+    'Full charge from PV every (days)': 'Vollladung mit PV alle (Tage)',
+    'Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. 0 = off. Needs EVCC URL.':
+        'Fällig so viele Tage nach der letzten 100-%-Ladung. An einem Tag, an dem die EVCC-Solarprognose die fehlende Energie deckt, geht das EVCC-Ladeziel dieses Autos auf 100 % und danach zurück – nie mit Netzstrom. 0 = aus. Braucht die EVCC-URL.',
+    'Base load for the forecast (W)': 'Grundlast für die Prognose (W)',
+    'Subtracted from the solar forecast – house consumption the car cannot use.':
+        'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
+    'Full charge from PV active – EVCC limit 100 %': 'Vollladung mit PV aktiv – EVCC-Ladeziel 100 %',
+    'Full charge due for {d} days – waiting for a day with enough PV.':
+        'Vollladung seit {d} Tagen fällig – wartet auf einen Tag mit genug PV.',
     'Interface': 'Oberfläche', 'Language': 'Sprache',
     'Save Settings': 'Einstellungen speichern',
     'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
@@ -613,6 +736,7 @@ def poll_vrm():
                 _save_cfg(cfg)
 
             _check_evcc_loadpoints(vehicles)
+            _full_charge_pv(vehicles)
 
             with _lock:
                 _cache['vehicles']    = vehicles
@@ -964,6 +1088,17 @@ def build_status_page():
                     warnings += (f'<div class="info-box">ℹ️ '
                                  f'{_t("LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.", d=days_overdue)}</div>')
 
+            # Periodic full charge from PV
+            fc_days = _get_int('FULL_CHARGE_DAYS', 0)
+            if cfg.get(f'full_charge_{vin}'):
+                warnings += f'<div class="info-box">☀️ {_t("Full charge from PV active – EVCC limit 100 %")}</div>'
+            elif fc_days > 0 and cfg.get(f'evcc_vehicle_{vin}') and soc < 100:
+                ref = last_full or cfg.get(f'full_charge_ref_{vin}', 0)
+                overdue = int((time.time() - ref) / 86400) - fc_days if ref else -1
+                if overdue >= 0:
+                    warnings += (f'<div class="info-box">☀️ '
+                                 f'{_t("Full charge due for {d} days – waiting for a day with enough PV.", d=overdue)}</div>')
+
             # Optimal zone band in bar
             zone_html = (f'<div class="bar-zone" style="left:{opt_min}%;'
                          f'width:{opt_max - opt_min}%;background:#22c55e"></div>')
@@ -1112,12 +1247,14 @@ def build_settings_page(saved=False, error_msg=''):
     reminder = cfg.get('FULL_REMINDER_DAYS') or os.environ.get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
     evcc_url = cfg.get('EVCC_URL') or os.environ.get('EVCC_URL', '')
+    fc_days  = cfg.get('FULL_CHARGE_DAYS') or os.environ.get('FULL_CHARGE_DAYS', '0')
+    fc_base  = cfg.get('FULL_CHARGE_BASE_LOAD') or os.environ.get('FULL_CHARGE_BASE_LOAD', '1500')
     language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
     lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
                         for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
-    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url = map(
-        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url))
+    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base = map(
+        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base))
 
     lfp_sel = 'selected' if bat_type == 'LFP' else ''
     nmc_sel = 'selected' if bat_type == 'NMC' else ''
@@ -1202,6 +1339,14 @@ def build_settings_page(saved=False, error_msg=''):
         <label>{_t('EVCC URL')}</label>
         <input type="text" name="EVCC_URL" value="{evcc_url}" placeholder="{_t('e.g. http://192.168.1.10:7070')}">
         <div class="hint">{_t('If an EVCC loadpoint keeps showing a car that is no longer plugged in, EVCC is told to identify the vehicle again. Loadpoints are detected automatically. Leave empty to disable.')}</div>
+
+        <label>{_t('Full charge from PV every (days)')}</label>
+        <input type="number" name="FULL_CHARGE_DAYS" value="{fc_days}" min="0" max="60">
+        <div class="hint">{_t('Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. 0 = off. Needs EVCC URL.')}</div>
+
+        <label>{_t('Base load for the forecast (W)')}</label>
+        <input type="number" name="FULL_CHARGE_BASE_LOAD" value="{fc_base}" min="0" max="20000">
+        <div class="hint">{_t('Subtracted from the solar forecast – house consumption the car cannot use.')}</div>
 
         <div class="section-title">{_t('Interface')}</div>
         <label>{_t('Language')}</label>
