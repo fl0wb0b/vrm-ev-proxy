@@ -102,7 +102,16 @@ Set **Full charge from PV every (days)** in `/settings` (0 = off, needs **EVCC U
 
 Full charges only start on loadpoints that take at least **Minimum loadpoint power** (default 4000 W, a switched socket counts with its `minCurrent`): at 2.3 kW a car loses roughly 15–35 % (100–400 W own consumption while charging plus the slow top-off near 100 %), a 3-phase wallbox about 7–10 % (ADAC and others). If a car only ever charges on a slow loadpoint, it still gets its full charge there once it is twice as overdue (e.g. after 14 days with 7). Tesla recommends a full charge of LFP packs at least weekly – **7 days** is the manufacturer value; a car should not sit at 100 % for days, which is why the limit goes back right after reaching it.
 
-Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then. The EVCC vehicle of each VIN is learned from a loadpoint showing that car (matched by range and SoC), so the car has to be plugged in and identified once.
+Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then. The proxy needs to know which EVCC vehicle has which VIN. EVCC's API hides the VIN without an admin login, but EVCC's database has it – mount EVCC's data directory **read-only** and the mapping is there right away:
+
+```yaml
+  vrm-ev-proxy:
+    volumes:
+      - ./vrm-ev-proxy/config:/config
+      - ./evcc/db:/evcc:ro          # EVCC's /root/.evcc – read-only
+```
+
+The default path is `/evcc/evcc.db` (setting **EVCC database**). Without the mount, a car is learned the first time EVCC shows it on a loadpoint (matched by range and SoC).
 
 > **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
 
