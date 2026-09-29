@@ -207,6 +207,7 @@ def _full_charge_pv(vehicles):
     evcc_vehicles = state.get('vehicles') or {}
     points = state.get('loadpoints') or []
     base_w = _get_int('FULL_CHARGE_BASE_LOAD', 1500)
+    min_w  = _get_int('FULL_CHARGE_MIN_POWER', 4000)
     today  = datetime.date.fromtimestamp(now).isoformat()
 
     with _cfg_lock:
@@ -243,7 +244,9 @@ def _full_charge_pv(vehicles):
                         _evcc_post(url, f'vehicles/{name}/limitsoc/{active["restore"]}')
                     del cfg[f'full_charge_{vin}']
                     print(f'[FULL] {title}: {reason} – EVCC limit back to {active.get("restore")} %', flush=True)
-                elif days > 0 and (now - last_full) / 86400 >= days and point and soc < 100:
+                elif (days > 0 and (now - last_full) / 86400 >= days and point and soc < 100
+                      # slow loadpoints lose too much – only once the full charge is twice overdue
+                      and (max_w >= min_w or (now - last_full) / 86400 >= 2 * days)):
                     need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
                     surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
                     if surplus < need:
@@ -337,6 +340,7 @@ NUMERIC_SETTINGS = {
     'FULL_REMINDER_DAYS': (int,   7,  90),
     'FULL_CHARGE_DAYS':   (int,   0,  60),
     'FULL_CHARGE_BASE_LOAD': (int, 0, 20000),
+    'FULL_CHARGE_MIN_POWER': (int, 0, 50000),
 }
 
 # ── Web UI language (GUI only – logs, API and EVCC fields stay English) ────────
@@ -411,14 +415,17 @@ _DE = {
         'Zeigt ein EVCC-Ladepunkt ein Auto, das nicht mehr eingesteckt ist, startet EVCC die Fahrzeugerkennung neu. Ladepunkte werden automatisch erkannt. Leer lassen zum Deaktivieren.',
     'EVCC URL must start with http:// or https://.': 'Die EVCC-URL muss mit http:// oder https:// beginnen.',
     'Full charge from PV every (days)': 'Vollladung mit PV alle (Tage)',
-    'Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. 0 = off. Needs EVCC URL.':
-        'Fällig so viele Tage nach der letzten 100-%-Ladung. An einem Tag, an dem die EVCC-Solarprognose die fehlende Energie deckt, geht das EVCC-Ladeziel dieses Autos auf 100 % und danach zurück – nie mit Netzstrom. 0 = aus. Braucht die EVCC-URL.',
+    'Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. Tesla recommends a full charge at least weekly for LFP (7). 0 = off. Needs EVCC URL.':
+        'Fällig so viele Tage nach der letzten 100-%-Ladung. An einem Tag, an dem die EVCC-Solarprognose die fehlende Energie deckt, geht das EVCC-Ladeziel dieses Autos auf 100 % und danach zurück – nie mit Netzstrom. Tesla empfiehlt bei LFP mindestens wöchentlich voll zu laden (7). 0 = aus. Braucht die EVCC-URL.',
+    'Minimum loadpoint power (W)': 'Mindestleistung des Ladepunkts (W)',
+    'Full charges only start on loadpoints that take at least this much. Below ~4 kW (e.g. a 2.3 kW socket) 15–35 % of the energy is lost, a 3-phase wallbox loses ~7–10 %. Slower loadpoints are used once the full charge is twice as overdue. 0 = any loadpoint.':
+        'Vollladungen starten bevorzugt an Ladepunkten mit mindestens dieser Leistung. Unter ~4 kW (z.B. Schuko mit 2,3 kW) gehen 15–35 % der Energie verloren, eine dreiphasige Wallbox verliert ~7–10 %. Ist die Vollladung doppelt so lange überfällig, darf auch ein langsamerer Ladepunkt. 0 = jeder Ladepunkt.',
     'Base load for the forecast (W)': 'Grundlast für die Prognose (W)',
     'Subtracted from the solar forecast – house consumption the car cannot use.':
         'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
     'Full charge from PV active – EVCC limit 100 %': 'Vollladung mit PV aktiv – EVCC-Ladeziel 100 %',
     'Full charge due for {d} days – waiting for a day with enough PV.':
-        'Vollladung seit {d} Tagen fällig – wartet auf einen Tag mit genug PV.',
+        'Vollladung seit {d} Tagen fällig – wartet auf einen Tag mit genug PV (an einem Ladepunkt mit ausreichend Leistung).',
     'Interface': 'Oberfläche', 'Language': 'Sprache',
     'Save Settings': 'Einstellungen speichern',
     'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
@@ -1249,12 +1256,13 @@ def build_settings_page(saved=False, error_msg=''):
     evcc_url = cfg.get('EVCC_URL') or os.environ.get('EVCC_URL', '')
     fc_days  = cfg.get('FULL_CHARGE_DAYS') or os.environ.get('FULL_CHARGE_DAYS', '0')
     fc_base  = cfg.get('FULL_CHARGE_BASE_LOAD') or os.environ.get('FULL_CHARGE_BASE_LOAD', '1500')
+    fc_min   = cfg.get('FULL_CHARGE_MIN_POWER') or os.environ.get('FULL_CHARGE_MIN_POWER', '4000')
     language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
     lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
                         for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
-    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base = map(
-        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base))
+    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min = map(
+        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min))
 
     lfp_sel = 'selected' if bat_type == 'LFP' else ''
     nmc_sel = 'selected' if bat_type == 'NMC' else ''
@@ -1341,12 +1349,16 @@ def build_settings_page(saved=False, error_msg=''):
         <div class="hint">{_t('If an EVCC loadpoint keeps showing a car that is no longer plugged in, EVCC is told to identify the vehicle again. Loadpoints are detected automatically. Leave empty to disable.')}</div>
 
         <label>{_t('Full charge from PV every (days)')}</label>
-        <input type="number" name="FULL_CHARGE_DAYS" value="{fc_days}" min="0" max="60">
-        <div class="hint">{_t('Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. 0 = off. Needs EVCC URL.')}</div>
+        <input type="number" name="FULL_CHARGE_DAYS" value="{fc_days}" placeholder="7" min="0" max="60">
+        <div class="hint">{_t('Due this many days after the last 100 %. On a day whose EVCC solar forecast covers the missing energy, the EVCC limit of that car goes to 100 % and back afterwards – never with grid power. Tesla recommends a full charge at least weekly for LFP (7). 0 = off. Needs EVCC URL.')}</div>
 
         <label>{_t('Base load for the forecast (W)')}</label>
         <input type="number" name="FULL_CHARGE_BASE_LOAD" value="{fc_base}" min="0" max="20000">
         <div class="hint">{_t('Subtracted from the solar forecast – house consumption the car cannot use.')}</div>
+
+        <label>{_t('Minimum loadpoint power (W)')}</label>
+        <input type="number" name="FULL_CHARGE_MIN_POWER" value="{fc_min}" min="0" max="50000">
+        <div class="hint">{_t('Full charges only start on loadpoints that take at least this much. Below ~4 kW (e.g. a 2.3 kW socket) 15–35 % of the energy is lost, a 3-phase wallbox loses ~7–10 %. Slower loadpoints are used once the full charge is twice as overdue. 0 = any loadpoint.')}</div>
 
         <div class="section-title">{_t('Interface')}</div>
         <label>{_t('Language')}</label>
