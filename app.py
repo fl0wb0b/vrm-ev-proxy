@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.8.2
+vrm-ev-proxy v2.9.0
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.8.2"
+VERSION    = "2.9.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -163,6 +163,7 @@ FULL_CHARGE_CHECK_EVERY = 300    # seconds between evaluations
 FULL_CHARGE_PV_MARGIN   = 0.8    # share of the forecast surplus that is trusted
 FULL_CHARGE_LOSSES      = 0.9    # charging efficiency
 FULL_CHARGE_DAY_OVER_KWH = 0.5   # less surplus left today → the PV day is over
+FULL_CHARGE_HOLD        = 1800   # seconds at 100 % without charging before the limit goes back
 
 def _evcc_post(url, path, method='POST'):
     with urlopen(Request(f'{url}/api/{path}', method=method), timeout=5) as resp:
@@ -202,6 +203,12 @@ def _pv_surplus_today_kwh(state, now, max_w, base_w):
              for ts, w in points if now - step < ts < midnight)
     return wh / 1000 * FULL_CHARGE_PV_MARGIN
 
+def _due_day(last_full, days):
+    """Start (00:00) of the day that is <days> days after the last full charge –
+    so the whole sunny day counts, not just the hours after the time of day."""
+    day = datetime.date.fromtimestamp(last_full) + datetime.timedelta(days=days)
+    return datetime.datetime.combine(day, datetime.time()).timestamp()
+
 def _full_charge_pv(vehicles):
     days = _get_int('FULL_CHARGE_DAYS', 0)
     url  = str(_get('EVCC_URL')).rstrip('/')
@@ -235,9 +242,11 @@ def _full_charge_pv(vehicles):
             if vin and name in evcc_vehicles:
                 cfg[f'evcc_vehicle_{vin}'] = name
 
+        infos = {}
         for vin, veh in vehicles.items():
             name = cfg.get(f'evcc_vehicle_{vin}')
             if name not in evcc_vehicles:
+                infos[vin] = {'state': 'unmapped'}
                 continue
             title = evcc_vehicles[name].get('title') or name
             soc = veh['data']['battery_level']
@@ -248,26 +257,63 @@ def _full_charge_pv(vehicles):
             try:
                 if active:
                     surplus = _pv_surplus_today_kwh(state, now, max_w or 11000, base_w)
+                    reached = cfg.get(f'last_full_charge_{vin}', 0) > active['since']
+                    # EVCC never stops at a limit of 100 %, the car ends the charge itself.
+                    # Tesla shows 100 % before the top-off (balancing) is done – so wait
+                    # until the car stopped charging and sat at 100 % for a while.
+                    charging = int(_num(veh['raw']['ev'].get('/ChargingState'), 0)) == 3
+                    if soc >= 100 and not charging:
+                        active.setdefault('done_since', now)
+                    else:
+                        active.pop('done_since', None)
                     if days <= 0:
                         reason = 'turned off'
-                    elif soc >= 100 or cfg.get(f'last_full_charge_{vin}', 0) > active['since']:
-                        reason = '100 % reached'
-                    elif active['day'] != today or surplus < FULL_CHARGE_DAY_OVER_KWH:
+                    elif soc >= 100 and now - active.get('done_since', now) >= FULL_CHARGE_HOLD:
+                        reason = f'100 % and charging finished for {FULL_CHARGE_HOLD // 60} min'
+                    elif reached and (not point or soc < 100):
+                        reason = '100 % reached, car unplugged or driven'
+                    elif active['day'] != today:
+                        reason = 'new day'
+                    elif soc < 100 and surplus < FULL_CHARGE_DAY_OVER_KWH:
                         reason = f'PV day over at {soc} %, next try on the next sunny day'
                     else:
+                        infos[vin] = {'state': 'active', 'since': active['since'],
+                                      'back_at': active['done_since'] + FULL_CHARGE_HOLD
+                                      if active.get('done_since') else None}
                         continue
                     if active.get('restore'):
                         _evcc_post(url, f'vehicles/{name}/limitsoc/{active["restore"]}')
                     del cfg[f'full_charge_{vin}']
+                    last_full = cfg.get(f'last_full_charge_{vin}') or last_full
+                    infos[vin] = {'state': 'scheduled', 'due': _due_day(last_full, days)}
                     print(f'[FULL] {title}: {reason} – EVCC limit back to {active.get("restore")} %', flush=True)
-                elif (days > 0 and (now - last_full) / 86400 >= days and point and soc < 100
-                      # slow loadpoints lose too much – only once the full charge is twice overdue
-                      and (max_w >= min_w or (now - last_full) / 86400 >= 2 * days)):
+                else:
+                    info = infos[vin] = {'due': _due_day(last_full, days),
+                                         'slow_from': _due_day(last_full, 2 * days), 'kw': max_w / 1000}
+                    if days <= 0 or soc >= 100:
+                        info['state'] = 'off' if days <= 0 else 'scheduled'
+                        continue
+                    if now < info['due']:
+                        info['state'] = 'scheduled'
+                        continue
+                    if not point:
+                        info['state'] = 'unplugged'
+                        continue
+                    # slow loadpoints lose too much – only once the full charge is twice overdue
+                    if max_w < min_w and now < info['slow_from']:
+                        info['state'] = 'slow'
+                        continue
                     need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
                     surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
-                    # only while the sun is up – the car shouldn't wait at 100 % overnight
-                    if surplus < need or _pv_now_w(state, now) <= base_w:
+                    info.update(pv=surplus, need=need)
+                    if surplus < need:
+                        info['state'] = 'pv'
                         continue
+                    # only while the sun is up – the car shouldn't wait at 100 % overnight
+                    if _pv_now_w(state, now) <= base_w:
+                        info['state'] = 'night'
+                        continue
+                    infos[vin] = {'state': 'active', 'since': now, 'back_at': None}
                     limit = int(_num(evcc_vehicles[name].get('limitSoc'), 0))
                     if limit != 100:
                         _evcc_post(url, f'vehicles/{name}/limitsoc/100')
@@ -278,6 +324,8 @@ def _full_charge_pv(vehicles):
             except Exception as exc:
                 print(f'[FULL] {title}: EVCC call failed: {exc}', flush=True)
         _save_cfg(cfg)
+    with _lock:
+        _cache['full_charge_info'] = infos
 
 def _find_evcs(records, connection):
     """Return (device_name, {dbusPath: rawValue}) of the EVCS the EV is plugged into."""
@@ -338,6 +386,7 @@ _cache = {
     'evcc_redetect_ts': {},  # EVCC loadpoint -> time of the last vehicle re-detection
     'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
     'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
+    'full_charge_info': {},  # VIN -> state of the periodic full charge for the status page
 }
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
@@ -441,9 +490,20 @@ _DE = {
     'Base load for the forecast (W)': 'Grundlast für die Prognose (W)',
     'Subtracted from the solar forecast – house consumption the car cannot use.':
         'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
-    'Full charge from PV active – EVCC limit 100 %': 'Vollladung mit PV aktiv – EVCC-Ladeziel 100 %',
-    'Full charge due for {d} days – waiting for a day with enough PV.':
-        'Vollladung seit {d} Tagen fällig – wartet auf einen Tag mit genug PV (an einem Ladepunkt mit ausreichend Leistung).',
+    'Full charge from PV running since {t} – EVCC limit 100 %.': 'Vollladung mit PV läuft seit {t} – EVCC-Ladeziel 100 %.',
+    'Car finished charging, limit goes back at {t}.': 'Auto fertig geladen, Ladeziel geht um {t} zurück.',
+    'Full charge: EVCC vehicle not known yet – let EVCC identify the car on a loadpoint once.':
+        'Vollladung: EVCC-Fahrzeug noch unbekannt – das Auto einmal an einem EVCC-Ladepunkt erkennen lassen.',
+    'Next full charge from PV due {t}.': 'Nächste Vollladung mit PV fällig: {t}.',
+    'today ({date})': 'heute ({date})', 'tomorrow ({date})': 'morgen ({date})',
+    '{date} (in {d} days)': '{date} (in {d} Tagen)',
+    'Full charge due – starts once the car is identified on a loadpoint.':
+        'Vollladung fällig – startet, sobald das Auto an einem Ladepunkt erkannt ist.',
+    'Full charge due – this loadpoint ({kw} kW) is too slow, used from {t} on. Starts right away on a faster one.':
+        'Vollladung fällig – dieser Ladepunkt ({kw} kW) ist zu langsam, er wird ab {t} genutzt. An einem schnelleren startet sie sofort.',
+    'Full charge due – not enough PV today (forecast {pv} kWh, needed {need} kWh).':
+        'Vollladung fällig – heute reicht die PV nicht (Prognose {pv} kWh, nötig {need} kWh).',
+    'Full charge due – starts today once there is enough sun.': 'Vollladung fällig – startet heute, sobald genug Sonne da ist.',
     'Interface': 'Oberfläche', 'Language': 'Sprache',
     'Save Settings': 'Einstellungen speichern',
     'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
@@ -786,6 +846,39 @@ def poll_vrm():
         time.sleep(_interval())
 
 
+def _full_charge_text(fc):
+    """Status-page line for the periodic full charge of one car."""
+    def when(ts):
+        return time.strftime('%d.%m. %H:%M', time.localtime(ts))
+    def day(ts):
+        d = (datetime.date.fromtimestamp(ts) - datetime.date.fromtimestamp(time.time())).days
+        date = time.strftime('%d.%m.', time.localtime(ts))
+        if d <= 0: return _t('today ({date})', date=date)
+        if d == 1: return _t('tomorrow ({date})', date=date)
+        return _t('{date} (in {d} days)', date=date, d=d)
+    st = fc.get('state')
+    if st == 'active':
+        text = _t('Full charge from PV running since {t} – EVCC limit 100 %.', t=when(fc['since']))
+        if fc.get('back_at'):
+            text += ' ' + _t('Car finished charging, limit goes back at {t}.', t=when(fc['back_at']))
+        return text
+    if st == 'unmapped':
+        return _t('Full charge: EVCC vehicle not known yet – let EVCC identify the car on a loadpoint once.')
+    if st == 'scheduled':
+        return _t('Next full charge from PV due {t}.', t=day(fc['due']))
+    if st == 'unplugged':
+        return _t('Full charge due – starts once the car is identified on a loadpoint.')
+    if st == 'slow':
+        return _t('Full charge due – this loadpoint ({kw} kW) is too slow, used from {t} on. Starts right away on a faster one.',
+                  kw=_dec(fc['kw']), t=day(fc['slow_from']))
+    if st == 'pv':
+        return _t('Full charge due – not enough PV today (forecast {pv} kWh, needed {need} kWh).',
+                  pv=_dec(fc['pv']), need=_dec(fc['need']))
+    if st == 'night':
+        return _t('Full charge due – starts today once there is enough sun.')
+    return ''
+
+
 # ── SoC color ──────────────────────────────────────────────────────────────────
 def _soc_color(soc):
     bat     = _bat()
@@ -1115,15 +1208,11 @@ def build_status_page():
                                  f'{_t("LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.", d=days_overdue)}</div>')
 
             # Periodic full charge from PV
-            fc_days = _get_int('FULL_CHARGE_DAYS', 0)
-            if cfg.get(f'full_charge_{vin}'):
-                warnings += f'<div class="info-box">☀️ {_t("Full charge from PV active – EVCC limit 100 %")}</div>'
-            elif fc_days > 0 and cfg.get(f'evcc_vehicle_{vin}') and soc < 100:
-                ref = last_full or cfg.get(f'full_charge_ref_{vin}', 0)
-                overdue = int((time.time() - ref) / 86400) - fc_days if ref else -1
-                if overdue >= 0:
-                    warnings += (f'<div class="info-box">☀️ '
-                                 f'{_t("Full charge due for {d} days – waiting for a day with enough PV.", d=overdue)}</div>')
+            with _lock:
+                fc = dict(_cache['full_charge_info'].get(vin) or {})
+            fc_msg = _full_charge_text(fc) if _get_int('FULL_CHARGE_DAYS', 0) > 0 or fc.get('state') == 'active' else ''
+            if fc_msg:
+                warnings += f'<div class="info-box">☀️ {fc_msg}</div>'
 
             # Optimal zone band in bar
             zone_html = (f'<div class="bar-zone" style="left:{opt_min}%;'
