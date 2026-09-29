@@ -98,11 +98,21 @@ EVCC only identifies the vehicle again after the charger reported "disconnected"
 
 ### Periodic full charge from PV (LFP balancing)
 
-Set **Full charge from PV every (days)** in `/settings` (0 = off, needs **EVCC URL**). A car is due that many days after the proxy last recorded 100 % for it – any 100 % counts, at home, on a socket or at a Supercharger. Every 5 minutes the proxy checks EVCC's solar forecast: if the surplus left today – forecast minus **base load** (default 1500 W), capped at what the car's loadpoint can take (a switched socket: `minCurrent`), 80 % of it trusted – covers the energy up to 100 %, the proxy sets that vehicle's EVCC limit to 100 % (`POST /api/vehicles/<name>/limitsoc/100`) – only while the sun is up, so the car does not wait at 100 % overnight. EVCC never stops at a limit of 100 % – the car ends the charge itself. Tesla already shows 100 % while it is still topping off (that is when the BMS balances), so the previous limit only comes back once the car has **stopped charging and sat at 100 % for 30 minutes** – a lower limit would make EVCC cut the top-off. It also comes back when the car is unplugged or driven after reaching 100 %, when the PV day is over below 100 %, on the next day, or when the feature is turned off.
+LFP packs have a flat voltage curve, so the BMS counts charge in and out to know the SoC – and drifts. Only a full charge re-anchors it. Rough estimate: ~1–3 % after 1–2 weeks, **~3–5 % after 3–4 weeks or 100–150 kWh** without a full charge – noticeable mainly at low SoC.
 
-Full charges only start on loadpoints that take at least **Minimum loadpoint power** (default 4000 W, a switched socket counts with its `minCurrent`): at 2.3 kW a car loses roughly 15–35 % (100–400 W own consumption while charging plus the slow top-off near 100 %), a 3-phase wallbox about 7–10 % (ADAC and others). If a car only ever charges on a slow loadpoint, it still gets its full charge there once it is twice as overdue (e.g. after 14 days with 7). Tesla recommends a full charge of LFP packs at least weekly – **7 days** is the manufacturer value; a car should not sit at 100 % for days, which is why the limit goes back right after reaching it.
+In `/settings` (needs **EVCC URL**):
+- **Full charge from PV after (days)** – e.g. `28`
+- **… or after charging (kWh)** – e.g. `120`: energy charged since the last 100 %, i.e. EVCC's sessions of that vehicle (`/api/sessions`) plus what the car charged away from home (Supercharger – SoC rise × capacity while the car reports charging and `AtSite` is 0)
 
-Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then. The proxy needs to know which EVCC vehicle has which VIN. EVCC's API hides the VIN without an admin login, but EVCC's database has it – mount EVCC's data directory **read-only** and the mapping is there right away:
+Whichever comes first makes the car due; 0 turns that part off. Any 100 % resets both – at home, on a socket or at a Supercharger. A car that sits after a full charge stays due only by days.
+
+Every 5 minutes the proxy checks EVCC's solar forecast: if the surplus left today – forecast minus **base load** (default 1500 W), capped at what the car's loadpoint can take, 80 % of it trusted – covers the energy up to 100 %, and the sun is up, the proxy sets that vehicle's EVCC limit to 100 % (`POST /api/vehicles/<name>/limitsoc/100`). All loadpoints are treated the same.
+
+EVCC never stops at a limit of 100 % – the car ends the charge itself. Tesla already shows 100 % while it is still topping off (that is when the BMS balances), so the previous limit only comes back once the car has **stopped charging and sat at 100 % for 30 minutes** – a lower limit would make EVCC cut the top-off. It also comes back when the car is unplugged or driven after reaching 100 %, when the PV day is over below 100 %, on the next day, or when the feature is turned off.
+
+Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then.
+
+The proxy needs to know which EVCC vehicle has which VIN. EVCC's API hides the VIN without an admin login, but EVCC's database has it – mount EVCC's data directory **read-only** and the mapping is there right away:
 
 ```yaml
   vrm-ev-proxy:
