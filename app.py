@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.9.0
+vrm-ev-proxy v2.10.0
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -10,13 +10,14 @@ import datetime
 import html
 import json
 import os
+import sqlite3
 import threading
 import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.9.0"
+VERSION    = "2.10.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -203,6 +204,37 @@ def _pv_surplus_today_kwh(state, now, max_w, base_w):
              for ts, w in points if now - step < ts < midnight)
     return wh / 1000 * FULL_CHARGE_PV_MARGIN
 
+EVCC_DB_DEFAULT = '/evcc/evcc.db'   # EVCC's data dir, mounted read-only
+
+def _evcc_vins_from_db():
+    """VIN -> EVCC vehicle name ('db:<id>') from EVCC's own database.
+
+    EVCC's API hides the VIN without an admin login, its database has it: vehicles
+    are configs of class 3 with a 'vin'. Opened read-only; a failed read (e.g. EVCC
+    writing right now) just means no mapping this time.
+    """
+    path = _get('EVCC_DB', EVCC_DB_DEFAULT)
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=2)
+        try:
+            rows = con.execute('SELECT id, value FROM configs WHERE class = 3').fetchall()
+        finally:
+            con.close()
+    except Exception as exc:
+        print(f'[FULL] EVCC database {path} not readable: {exc}', flush=True)
+        return {}
+    vins = {}
+    for vid, value in rows:
+        try:
+            vin = str(json.loads(value).get('vin') or '').strip().upper()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if vin:
+            vins[vin] = f'db:{vid}'
+    return vins
+
 def _due_day(last_full, days):
     """Start (00:00) of the day that is <days> days after the last full charge –
     so the whole sunny day counts, not just the hours after the time of day."""
@@ -241,6 +273,11 @@ def _full_charge_pv(vehicles):
             vin = _match_vin(point, vehicles) if name else None
             if vin and name in evcc_vehicles:
                 cfg[f'evcc_vehicle_{vin}'] = name
+        # EVCC's database knows every VIN, plugged in or not – it wins
+        by_upper = {vin.upper(): vin for vin in vehicles}
+        for db_vin, name in _evcc_vins_from_db().items():
+            if db_vin in by_upper and name in evcc_vehicles:
+                cfg[f'evcc_vehicle_{by_upper[db_vin]}'] = name
 
         infos = {}
         for vin, veh in vehicles.items():
@@ -493,7 +530,10 @@ _DE = {
     'Full charge from PV running since {t} – EVCC limit 100 %.': 'Vollladung mit PV läuft seit {t} – EVCC-Ladeziel 100 %.',
     'Car finished charging, limit goes back at {t}.': 'Auto fertig geladen, Ladeziel geht um {t} zurück.',
     'Full charge: EVCC vehicle not known yet – let EVCC identify the car on a loadpoint once.':
-        'Vollladung: EVCC-Fahrzeug noch unbekannt – das Auto einmal an einem EVCC-Ladepunkt erkennen lassen.',
+        'Vollladung: Zuordnung zum EVCC-Fahrzeug fehlt noch – EVCC-Datenbank einbinden (README) oder das Auto einmal an einem EVCC-Ladepunkt erkennen lassen.',
+    'EVCC database (read-only)': 'EVCC-Datenbank (nur lesend)',
+    "Mount EVCC's data directory read-only (see README) – the proxy then knows which EVCC vehicle has which VIN right away. Without it, a car is learned the first time EVCC shows it on a loadpoint.":
+        'EVCC-Datenverzeichnis nur lesend einbinden (siehe README) – dann kennt der Proxy sofort, welches EVCC-Fahrzeug welche VIN hat. Ohne wird ein Auto gelernt, sobald EVCC es an einem Ladepunkt anzeigt.',
     'Next full charge from PV due {t}.': 'Nächste Vollladung mit PV fällig: {t}.',
     'today ({date})': 'heute ({date})', 'tomorrow ({date})': 'morgen ({date})',
     '{date} (in {d} days)': '{date} (in {d} Tagen)',
@@ -1365,12 +1405,13 @@ def build_settings_page(saved=False, error_msg=''):
     fc_days  = cfg.get('FULL_CHARGE_DAYS') or os.environ.get('FULL_CHARGE_DAYS', '0')
     fc_base  = cfg.get('FULL_CHARGE_BASE_LOAD') or os.environ.get('FULL_CHARGE_BASE_LOAD', '1500')
     fc_min   = cfg.get('FULL_CHARGE_MIN_POWER') or os.environ.get('FULL_CHARGE_MIN_POWER', '4000')
+    evcc_db  = cfg.get('EVCC_DB') or os.environ.get('EVCC_DB', '')
     language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
     lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
                         for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
-    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min = map(
-        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min))
+    site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min, evcc_db = map(
+        _esc, (site_id, interval, port, capacity, opt_min, opt_max, reminder, masked, evcc_url, fc_days, fc_base, fc_min, evcc_db))
 
     lfp_sel = 'selected' if bat_type == 'LFP' else ''
     nmc_sel = 'selected' if bat_type == 'NMC' else ''
@@ -1455,6 +1496,10 @@ def build_settings_page(saved=False, error_msg=''):
         <label>{_t('EVCC URL')}</label>
         <input type="text" name="EVCC_URL" value="{evcc_url}" placeholder="{_t('e.g. http://192.168.1.10:7070')}">
         <div class="hint">{_t('If an EVCC loadpoint keeps showing a car that is no longer plugged in, EVCC is told to identify the vehicle again. Loadpoints are detected automatically. Leave empty to disable.')}</div>
+
+        <label>{_t('EVCC database (read-only)')}</label>
+        <input type="text" name="EVCC_DB" value="{evcc_db}" placeholder="{EVCC_DB_DEFAULT}">
+        <div class="hint">{_t('Mount EVCC\'s data directory read-only (see README) – the proxy then knows which EVCC vehicle has which VIN right away. Without it, a car is learned the first time EVCC shows it on a loadpoint.')}</div>
 
         <label>{_t('Full charge from PV every (days)')}</label>
         <input type="number" name="FULL_CHARGE_DAYS" value="{fc_days}" placeholder="7" min="0" max="60">
@@ -1615,6 +1660,8 @@ def _parse_settings(params):
         updates[key] = str(val)
     if int(updates.get('OPT_MIN', 0)) >= int(updates.get('OPT_MAX', 100)):
         return {}, _t('Optimal minimum must be lower than optimal maximum.')
+    if 'EVCC_DB' in params:
+        updates['EVCC_DB'] = params['EVCC_DB'].strip() or None   # cleared → default path
     if 'EVCC_URL' in params:
         evcc_url = params['EVCC_URL'].strip().rstrip('/')
         if evcc_url and not evcc_url.startswith(('http://', 'https://')):
