@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.8.0
+vrm-ev-proxy v2.8.1
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.8.0"
+VERSION    = "2.8.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -103,16 +103,22 @@ def _evcc_redetect(url, lp, reason):
     except Exception as exc:
         print(f'[EVCC] Vehicle detection restart on loadpoint {lp} failed ({reason}): {exc}', flush=True)
 
-def _match_vin(range_km, vehicles):
-    """VIN whose range matches an EVCC loadpoint's vehicle range – None unless exactly one does.
+def _match_vin(point, vehicles):
+    """VIN of the car an EVCC loadpoint shows – None unless exactly one matches.
 
-    EVCC's /api/state names no VIN, but its vehicleRange is the battery_range this
-    proxy serves (miles → km), lagging by at most one EVCC poll.
+    EVCC's /api/state names no VIN, but its vehicleRange and vehicleSoc come from
+    this proxy (battery_range in miles → km, battery_level), lagging by at most one
+    EVCC poll. Range first; SoC decides between cars with a similar range.
     """
+    range_km = _num(point.get('vehicleRange'), 0)
     if range_km <= 0:
         return None
     hits = [vin for vin, v in vehicles.items()
             if abs(v['range_km'] - range_km) <= EVCC_RANGE_TOLERANCE_KM]
+    soc = _num(point.get('vehicleSoc'), 0)
+    if len(hits) > 1 and soc > 0:
+        hits = [vin for vin in hits
+                if abs(vehicles[vin]['data']['battery_level'] - soc) <= EVCC_SOC_TOLERANCE]
     return hits[0] if len(hits) == 1 else None
 
 def _check_evcc_loadpoints(vehicles):
@@ -139,7 +145,7 @@ def _check_evcc_loadpoints(vehicles):
         if (not point.get('charging') or not point.get('vehicleName')
                 or point.get('vehicleDetectionActive')):
             continue
-        vin = _match_vin(_num(point.get('vehicleRange'), 0), vehicles)
+        vin = _match_vin(point, vehicles)
         if not vin or vehicles[vin]['data']['charging_state'] != 'Disconnected':
             continue
         with _lock:
@@ -215,7 +221,7 @@ def _full_charge_pv(vehicles):
         # Learn which EVCC vehicle is which VIN from loadpoints showing a car
         for point in points:
             name = point.get('vehicleName')
-            vin = _match_vin(_num(point.get('vehicleRange'), 0), vehicles) if name else None
+            vin = _match_vin(point, vehicles) if name else None
             if vin and name in evcc_vehicles:
                 cfg[f'evcc_vehicle_{vin}'] = name
 
@@ -324,6 +330,7 @@ _cache = {
 }
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
+EVCC_SOC_TOLERANCE      = 2    # % – EVCC estimates the SoC between polls
 AWAY_CHARGE_MAX_AGE     = 900  # seconds a car's own 'charging' report counts away from its station
 STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
 _lock     = threading.Lock()
