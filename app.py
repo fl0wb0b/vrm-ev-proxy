@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.8.1
+vrm-ev-proxy v2.8.2
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -16,7 +16,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.8.1"
+VERSION    = "2.8.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -174,8 +174,8 @@ def _loadpoint_max_w(point):
     amps = point.get('minCurrent') if point.get('chargerFeatureSwitchDevice') else point.get('maxCurrent')
     return _num(amps, 16) * phases * 230
 
-def _pv_surplus_today_kwh(state, now, max_w, base_w):
-    """Solar surplus (forecast minus base load, capped at max_w) left today, in kWh."""
+def _solar_forecast(state):
+    """EVCC's solar forecast as [(unix time, W)]."""
     series = ((state.get('forecast') or {}).get('solar') or {}).get('timeseries') or []
     points = []
     for entry in series:
@@ -185,6 +185,16 @@ def _pv_surplus_today_kwh(state, now, max_w, base_w):
             points.append((ts, _num(entry.get('val'), 0)))
         else:
             points.append((_num(entry[0], 0), _num(entry[1], 0)))
+    return points
+
+def _pv_now_w(state, now):
+    """Forecast solar power of the current slot."""
+    past = [w for ts, w in _solar_forecast(state) if ts <= now]
+    return past[-1] if past else 0.0
+
+def _pv_surplus_today_kwh(state, now, max_w, base_w):
+    """Solar surplus (forecast minus base load, capped at max_w) left today, in kWh."""
+    points = _solar_forecast(state)
     midnight = (datetime.datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
                 + datetime.timedelta(days=1)).timestamp()
     step = points[1][0] - points[0][0] if len(points) > 1 else 900
@@ -255,7 +265,8 @@ def _full_charge_pv(vehicles):
                       and (max_w >= min_w or (now - last_full) / 86400 >= 2 * days)):
                     need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
                     surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
-                    if surplus < need:
+                    # only while the sun is up – the car shouldn't wait at 100 % overnight
+                    if surplus < need or _pv_now_w(state, now) <= base_w:
                         continue
                     limit = int(_num(evcc_vehicles[name].get('limitSoc'), 0))
                     if limit != 100:
@@ -689,10 +700,11 @@ def poll_vrm():
                     # ── Track last full charge (per VIN) ──────────────────────────
                     # Record the moment 100 % is reached – not every poll while the car
                     # sits at 100 % plugged in (that kept moving the date to "today").
+                    # Any state counts: a socket that already reports Sustain (244) at
+                    # 100 %, or a Supercharger (AtSite 0 → Disconnected here).
                     lfc_key  = f'last_full_charge_{vin}'
                     prev_soc = cfg.get(f'last_soc_for_cycles_{vin}')
-                    if (soc >= 100 and charging_state in ('Charging', 'Complete', 'Stopped')
-                            and (prev_soc is None or prev_soc < 100)):
+                    if soc >= 100 and (prev_soc is None or prev_soc < 100):
                         cfg[lfc_key] = now
                         print(f'[VRM] Full charge reached for {vin} – timestamp saved.', flush=True)
 
