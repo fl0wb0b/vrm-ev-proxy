@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.11.0"
+VERSION    = "2.11.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -143,8 +143,21 @@ def _check_evcc_loadpoints(vehicles):
         return
     now = time.time()
     for lp, point in enumerate(state.get('loadpoints') or [], 1):
-        if (not point.get('charging') or not point.get('vehicleName')
-                or point.get('vehicleDetectionActive')):
+        if not point.get('charging') or point.get('vehicleDetectionActive'):
+            continue
+        if not point.get('vehicleName'):
+            # Charging without any car: a switched socket never reports 'plugged in',
+            # so EVCC never starts detection. Only if a car here charges with about
+            # this power (keeps heat pumps and other chargers out).
+            lp_w = _num(point.get('chargePower'), 0)
+            if any(v['data']['charging_state'] == 'Charging' and v['power_w'] > 0
+                   and abs(v['power_w'] - lp_w) <= EVCC_POWER_TOLERANCE * max(lp_w, 1)
+                   for v in vehicles.values()):
+                with _lock:
+                    if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
+                        continue
+                    _cache['evcc_redetect_ts'][lp] = now
+                _evcc_redetect(url, lp, 'charging without a vehicle')
             continue
         vin = _match_vin(point, vehicles)
         if not vin or vehicles[vin]['data']['charging_state'] != 'Disconnected':
@@ -466,6 +479,7 @@ _cache = {
 }
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
+EVCC_POWER_TOLERANCE    = 0.3  # relative power difference between a car here and an EVCC loadpoint
 EVCC_SOC_TOLERANCE      = 2    # % – EVCC estimates the SoC between polls
 AWAY_CHARGE_MAX_AGE     = 900  # seconds a car's own 'charging' report counts away from its station
 STICKY_VIN_GRACE = 120  # seconds to hold last known real VIN while VRM catches up
