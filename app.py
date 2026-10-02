@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.13.1"
+VERSION    = "2.14.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -512,11 +512,13 @@ _req = threading.local()   # per-request language, set by the HTTP handler
 
 # English source text → German. Placeholders use str.format syntax.
 _DE = {
+    'Own picture URL (optional, wins over the choice)': 'Eigene Bild-URL (optional, hat Vorrang)',
+    'Picture URL must start with http:// or https://.': 'Die Bild-URL muss mit http:// oder https:// beginnen.',
     'Last contact': 'Letzter Kontakt',
     # vehicle pictures
     'Vehicle pictures': 'Fahrzeugbilder',
     'Automatic (from model and VIN)': 'Automatisch (nach Modell und VIN)',
-    'Own drawing, no download': 'Eigene Zeichnung, ohne Download',
+    'No picture': 'Kein Bild',
     'Unknown vehicle picture: {v}': 'Unbekanntes Fahrzeugbild: {v}',
     'Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.':
         'Die Bilder sind Tesla-Renderings von github.com/teslamotors/custom-wraps und werden von deinem Browser direkt von GitHub geladen – hier wird nichts gespeichert.',
@@ -1002,25 +1004,14 @@ def _full_charge_text(fc):
 _TESLA_WMI = ('5YJ', '7SA', 'LRW', 'XP7', 'SFZ')
 
 def _car_kind(name, vin):
-    """'model3', 'modely' or 'car' – from the name VRM gives, else from a Tesla VIN
-    (4th character: 3 = Model 3, Y = Model Y)."""
-    text = (name or '').lower().replace(' ', '')
-    if 'modely' in text: return 'modely'
-    if 'model3' in text: return 'model3'
+    """'model3' or 'modely' for Teslas (from the name VRM gives, else the 4th VIN character: 3 / Y), else 'car'."""
+    squashed = (name or '').lower().replace(' ', '')
+    if 'modely' in squashed: return 'modely'
+    if 'model3' in squashed: return 'model3'
     vin = (vin or '').upper()
     if vin[:3] in _TESLA_WMI and len(vin) > 3:
         return {'Y': 'modely', '3': 'model3'}.get(vin[3], 'car')
     return 'car'
-
-_CAR_BODY = {
-    # viewBox 0 0 120 44: body path, window path
-    'model3': ('M5 31 C5 27 8 25 15 24 L36 18 C43 13 51 11 61 11 L79 11 C87 11 93 15 99 21 L110 24 C114 25 116 27 116 31 L116 34 L5 34 Z',
-               'M40 19 C46 15 52 14 60 14 L77 14 C83 14 87 17 91 21 L40 21 Z'),
-    'modely': ('M5 31 C5 27 8 24 15 23 L34 16 C40 10 50 8 61 8 L88 8 C97 9 105 15 109 23 L112 25 C115 26 116 28 116 31 L116 34 L5 34 Z',
-               'M38 17 C44 12 52 11 61 11 L86 11 C93 12 99 17 102 22 L38 22 Z'),
-    'car':    ('M5 31 C5 27 8 25 15 24 L38 18 C44 14 52 12 62 12 L80 12 C88 12 94 16 99 21 L108 24 C113 25 116 27 116 31 L116 34 L5 34 Z',
-               'M42 19 C47 16 53 15 61 15 L78 15 C84 15 88 18 92 21 L42 21 Z'),
-}
 
 # Vehicle pictures: Tesla's own renderings from github.com/teslamotors/custom-wraps. They are NOT
 # copied into this repository (no licence file there) – the browser loads them from GitHub when
@@ -1047,7 +1038,7 @@ _VIN_YEAR.update({'P': 2023, 'R': 2024, 'S': 2025, 'T': 2026, 'V': 2027, 'W': 20
 def _car_image_id(vin, name):
     """The chosen picture ('drawing' = none), else a guess from model and VIN model year."""
     chosen = _load_cfg().get(f'car_image_{vin}')
-    if chosen == 'drawing' or chosen in CAR_IMAGES:
+    if chosen == 'drawing' or chosen in CAR_IMAGES:   # 'drawing' = the stored value for "no picture"
         return chosen
     kind = _car_kind(name, vin)
     year = _VIN_YEAR.get((vin or '  ')[9:10].upper(), 0)
@@ -1057,25 +1048,19 @@ def _car_image_id(vin, name):
         return 'modely-2025-base' if year >= 2025 else 'modely'
     return 'drawing'
 
-def _car_visual(vin, name, color):
-    """Hero banner: the drawing underneath (fallback), the Tesla rendering on top (hidden if it fails to load)."""
+def _car_visual(vin, name, charging=False):
+    """Hero banner with the picture: an own URL if set, else the Tesla rendering. No picture → no banner
+    (an empty row, so the rows of several cars still line up). `charging` adds a soft glow under the car."""
     img_id = _car_image_id(vin, name)
-    img = ''
-    if img_id in CAR_IMAGES:
-        img = (f'<img src="{CAR_IMAGE_URL.format(id=img_id)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
-               f'onerror="this.style.display=\'none\'" '
-               f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 53%">')
-    return (f'<div class="vhero" style="display:flex;align-items:center;justify-content:center">'
-            f'{_car_svg(_car_kind(name, vin), color)}{img}</div>')
-
-def _car_svg(kind, color):
-    body, window = _CAR_BODY.get(kind, _CAR_BODY['car'])
-    return (f'<svg viewBox="0 0 120 44" width="220" height="81" role="img" aria-hidden="true" '
-            f'style="flex:none">'
-            f'<path d="{body}" fill="{color}" fill-opacity=".85"/>'
-            f'<path d="{window}" fill="#0f172a" fill-opacity=".55"/>'
-            f'<circle cx="28" cy="34" r="7.5" fill="#0f172a" stroke="#475569" stroke-width="2"/>'
-            f'<circle cx="94" cy="34" r="7.5" fill="#0f172a" stroke="#475569" stroke-width="2"/></svg>')
+    url = str(_load_cfg().get(f'car_image_url_{vin}') or '')
+    if not url.startswith(('http://', 'https://')):
+        url = CAR_IMAGE_URL.format(id=img_id) if img_id in CAR_IMAGES else ''
+    if not url:
+        return '<div class="vhero none"></div>'
+    return (f'<div class="vhero{" charging" if charging else ""}">'
+            f'<img src="{_esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
+            f'onerror="this.parentNode.className=\'vhero none\'" '
+            f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 53%"></div>')
 
 
 def _soc_color(soc):
@@ -1195,6 +1180,9 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 /* one card per vehicle */
 .vcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: .85rem; }
 .vhero { position: relative; aspect-ratio: 16 / 9; background: #0a0a0b; }
+.vhero.none { aspect-ratio: auto; height: 0; background: none; }
+.vhero.none::after { display: none; }
+.vhero.none + .vi.head { margin-top: 0; padding-top: 1.3rem; }
 .vhero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
                 background: linear-gradient(to bottom, rgba(17,22,28,0), var(--card)); pointer-events: none; }
 .vi { padding: 0 1.3rem; position: relative; z-index: 1; min-width: 0; }
@@ -1241,6 +1229,23 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
   position: absolute; top: 0; height: 100%; border-radius: 999px; opacity: .14;
 }
 .bar-fill { height: 100%; border-radius: 999px; transition: width .5s ease; }
+/* charging: a light band flows along the filled bar and the bar breathes (like the car's own display) */
+.bar-fill.charging {
+  background: linear-gradient(100deg, var(--c) 0%, var(--c) 35%, color-mix(in srgb, var(--c) 45%, #ffffff) 50%, var(--c) 65%, var(--c) 100%) !important;
+  background-size: 250% 100%; animation: flow 2.2s linear infinite, breathe 2.2s ease-in-out infinite;
+}
+@keyframes flow { from { background-position: 150% 0; } to { background-position: -100% 0; } }
+@keyframes breathe { 0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--c) 50%, transparent); }
+                     50% { box-shadow: 0 0 14px color-mix(in srgb, var(--c) 85%, transparent); } }
+.chip.pulse { animation: chipglow 1.6s ease-in-out infinite; }
+@keyframes chipglow { 0%, 100% { box-shadow: 0 0 0 0 rgba(62,207,142,0); } 50% { box-shadow: 0 0 10px 0 rgba(62,207,142,.35); } }
+.vhero.charging::before { content: ""; position: absolute; left: 12%; right: 12%; bottom: 14%; height: 34%; z-index: 0;
+  background: radial-gradient(ellipse at center, rgba(62,207,142,.30), rgba(62,207,142,0) 70%);
+  animation: underglow 2.4s ease-in-out infinite; pointer-events: none; }
+@keyframes underglow { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .bar-fill.charging, .chip.pulse, .vhero.charging::before { animation: none; }
+}
 .bar-marker {
   position: absolute; top: -4px; width: 2px; height: 16px;
   border-radius: 2px; transform: translateX(-50%);
@@ -1494,12 +1499,13 @@ def build_status_page():
                         datetime.date.fromtimestamp(last_contact) == datetime.date.today()
                         else time.strftime('%d.%m. %H:%M', time.localtime(last_contact)) if last_contact else '–')
             shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
+            is_charging = state == 'Charging'
             power_sub = (f'⚡ {_dec(power_w / 1000)} kW' if state == 'Charging' and power_w > 100 else '')
             odo_str = f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")
 
             veh_cols.append(f"""
         <div class="vcard">
-          {_car_visual(vin, veh_name, bar_color)}
+          {_car_visual(vin, veh_name, is_charging)}
           <div class="vi head">
             <div class="vhead">
               <div style="min-width:0">
@@ -1507,7 +1513,7 @@ def build_status_page():
                 <div class="vvin">{_esc(vin)}</div>
               </div>
               <div class="chips">
-                <span class="chip" style="color:{state_color};border-color:{state_color}55">{icon} {state_label}</span>
+                <span class="chip{' pulse' if is_charging else ''}" style="color:{state_color};border-color:{state_color}55">{icon} {state_label}</span>
                 {bat_badge}
               </div>
             </div>
@@ -1521,7 +1527,7 @@ def build_status_page():
           <div class="vi">
             <div class="bar-wrap">
               {zone_html}
-              <div class="bar-fill" style="width:{soc}%;background:{bar_color};position:relative;z-index:1"></div>
+              <div class="bar-fill{' charging' if is_charging else ''}" style="width:{soc}%;--c:{bar_color};background:{bar_color};position:relative;z-index:1"></div>
               {limit_html}
               {opt_html}
             </div>
@@ -1598,10 +1604,12 @@ def build_settings_page(saved=False, error_msg=''):
     car_rows = []
     for vin, veh in (_cache.get('vehicles') or {}).items():
         current = _load_cfg().get(f'car_image_{vin}') or 'auto'
-        opts = [('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('Own drawing, no download'))] + list(CAR_IMAGES.items())
+        opts = [('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('No picture'))] + list(CAR_IMAGES.items())
         options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(v)}</option>' for k, v in opts)
         car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:#475569;font-size:.7rem">{_esc(vin)}</span></label>'
-                        f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>')
+                        f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>'
+                        f'<input type="text" name="CAR_IMAGE_URL_{_esc(vin)}" value="{_esc(_load_cfg().get(f"car_image_url_{vin}") or "")}" '
+                        f'placeholder="{_t("Own picture URL (optional, wins over the choice)")}" style="margin-top:.4rem">')
     car_image_html = ''
     if car_rows:
         car_image_html = (f'<div class="section-title">{_t("Vehicle pictures")}</div>' + ''.join(car_rows) +
@@ -1823,7 +1831,12 @@ def _parse_settings(params):
             return {}, _t('EVCC URL must start with http:// or https://.')
         updates['EVCC_URL'] = evcc_url or None   # cleared → feature off
     for key, val in params.items():
-        if key.startswith('CAR_IMAGE_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[10:]):
+        if key.startswith('CAR_IMAGE_URL_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[14:]):
+            val = val.strip()
+            if val and (not val.startswith(('http://', 'https://')) or len(val) > 400):
+                return {}, _t('Picture URL must start with http:// or https://.')
+            updates[f'car_image_url_{key[14:]}'] = val or None
+        elif key.startswith('CAR_IMAGE_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[10:]):
             val = val.strip()
             if val not in ('auto', 'drawing') and val not in CAR_IMAGES:
                 return {}, _t('Unknown vehicle picture: {v}', v=val)
