@@ -465,7 +465,7 @@ CHARGING_STATE_UI = {
     'Disconnected': ('🔌', 'Disconnected', '#6b7280'),
     'Stopped':      ('⏸',  'Connected',    '#f59e0b'),
     'Charging':     ('⚡',  'Charging',     '#22c55e'),
-    'Complete':     ('✅',  'Charged',      '#3b82f6'),
+    'Complete':     ('✅',  'Charged',      '#cdd3da'),
 }
 
 # ── Shared cache ───────────────────────────────────────────────────────────────
@@ -512,6 +512,7 @@ _req = threading.local()   # per-request language, set by the HTTP handler
 
 # English source text → German. Placeholders use str.format syntax.
 _DE = {
+    'Last contact': 'Letzter Kontakt',
     # vehicle pictures
     'Vehicle pictures': 'Fahrzeugbilder',
     'Automatic (from model and VIN)': 'Automatisch (nach Modell und VIN)',
@@ -1057,20 +1058,19 @@ def _car_image_id(vin, name):
     return 'drawing'
 
 def _car_visual(vin, name, color):
-    """Picture box: the drawing underneath, the Tesla rendering on top (hidden if it fails to load)."""
+    """Hero banner: the drawing underneath (fallback), the Tesla rendering on top (hidden if it fails to load)."""
     img_id = _car_image_id(vin, name)
     img = ''
     if img_id in CAR_IMAGES:
         img = (f'<img src="{CAR_IMAGE_URL.format(id=img_id)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
                f'onerror="this.style.display=\'none\'" '
-               f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 58%">')
-    return (f'<div style="position:relative;flex:none;width:150px;height:96px;margin-right:.8rem;overflow:hidden;'
-            f'border-radius:10px;background:#0b0f14;display:flex;align-items:center;justify-content:center">'
+               f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 53%">')
+    return (f'<div class="vhero" style="display:flex;align-items:center;justify-content:center">'
             f'{_car_svg(_car_kind(name, vin), color)}{img}</div>')
 
 def _car_svg(kind, color):
     body, window = _CAR_BODY.get(kind, _CAR_BODY['car'])
-    return (f'<svg viewBox="0 0 120 44" width="78" height="29" role="img" aria-hidden="true" '
+    return (f'<svg viewBox="0 0 120 44" width="220" height="81" role="img" aria-hidden="true" '
             f'style="flex:none">'
             f'<path d="{body}" fill="{color}" fill-opacity=".85"/>'
             f'<path d="{window}" fill="#0f172a" fill-opacity=".55"/>'
@@ -1122,7 +1122,7 @@ def _build_chart(history, opt_min, opt_max):
     for pct in (20, 40, 60, 80, 100):
         y = ty(pct)
         grid += (f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{W - PAD_R}" y2="{y:.1f}" '
-                 f'stroke="#1e293b" stroke-width="1"/>'
+                 f'stroke="#1a2029" stroke-width="1"/>'
                  f'<text x="{PAD_L - 3}" y="{y + 4:.1f}" text-anchor="end" '
                  f'fill="#475569" font-size="9">{pct}</text>')
 
@@ -1135,13 +1135,13 @@ def _build_chart(history, opt_min, opt_max):
 
     # SoC line
     pts = ' '.join(f'{tx(t):.1f},{ty(s):.1f}' for t, s in history)
-    line = (f'<polyline points="{pts}" fill="none" stroke="#38bdf8" '
+    line = (f'<polyline points="{pts}" fill="none" stroke="#e8eaed" '
             f'stroke-width="1.5" stroke-linejoin="round"/>')
 
     # Current dot
     last_t, last_s = history[-1]
     dot = (f'<circle cx="{tx(last_t):.1f}" cy="{ty(last_s):.1f}" '
-           f'r="3" fill="#38bdf8"/>')
+           f'r="3" fill="#e8eaed"/>')
 
     # X-axis day labels
     xlabels = ''
@@ -1161,119 +1161,153 @@ def _build_chart(history, opt_min, opt_max):
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
 _CSS = """
+:root {
+  --bg: #090c10; --card: #11161c; --card2: #151b22; --line: #212932;
+  --text: #e8eaed; --muted: #8b95a1; --faint: #5b6572;
+  --ok: #3ecf8e; --warn: #f5b73b; --bad: #ef5a5a; --silver: #cdd3da;
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #0f172a; color: #e2e8f0; min-height: 100vh;
+  background: var(--bg); color: var(--text); min-height: 100vh;
   display: flex; flex-direction: column; align-items: center; padding: 1.5rem 1rem;
 }
-h1 { font-size: 1.2rem; font-weight: 700; color: #f1f5f9; }
-.subtitle { color: #475569; font-size: .78rem; margin-bottom: 1.2rem; }
-nav { display: flex; gap: .4rem; margin-bottom: 1.5rem; }
+h1 { font-size: 1.1rem; font-weight: 600; color: var(--text); letter-spacing: .01em; }
+.subtitle { color: var(--faint); font-size: .74rem; margin-bottom: 1rem; }
+nav { display: flex; gap: .35rem; margin-bottom: 1.4rem; }
 nav a {
-  padding: .35rem .9rem; border-radius: 8px; font-size: .82rem;
-  text-decoration: none; color: #94a3b8; border: 1px solid #334155;
+  padding: .32rem .85rem; border-radius: 999px; font-size: .8rem;
+  text-decoration: none; color: var(--muted); border: 1px solid var(--line);
   transition: all .15s;
 }
-nav a.active, nav a:hover { background: #1e40af; color: #fff; border-color: #1e40af; }
-.container { width: 100%; max-width: 480px; }
+nav a:hover { color: var(--text); border-color: #38424e; }
+nav a.active { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
+.container { width: 100%; max-width: 520px; }
 .container.wide { max-width: 1120px; }
-.vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; align-items: start; }
+.vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 1.1rem; align-items: start; }
 .veh { min-width: 0; }
 .card {
-  background: #1e293b; border-radius: 12px; padding: 1.1rem 1.4rem;
-  margin-bottom: .85rem; border: 1px solid #334155;
+  background: var(--card); border-radius: 14px; padding: 1.1rem 1.3rem;
+  margin-bottom: .85rem; border: 1px solid var(--line);
 }
-.label { font-size: .7rem; color: #64748b; text-transform: uppercase;
-         letter-spacing: .06em; margin-bottom: .35rem; }
-.value { font-size: 2rem; font-weight: 700; color: #f1f5f9; }
+/* one card per vehicle */
+.vcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: .85rem; }
+.vhero { position: relative; aspect-ratio: 16 / 9; background: #0a0a0b; }
+.vhero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
+                background: linear-gradient(to bottom, rgba(17,22,28,0), var(--card)); pointer-events: none; }
+.vbody { padding: 0 1.3rem 1.2rem; margin-top: -.4rem; position: relative; z-index: 1; }
+.vhead { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; }
+.vname { font-size: 1.15rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.vvin { font-size: .7rem; color: var(--faint); letter-spacing: .03em; margin-top: .1rem; overflow-wrap: anywhere; }
+.chips { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
+.chip { display: inline-flex; align-items: center; gap: .3rem; padding: .18rem .6rem; border-radius: 999px;
+        font-size: .72rem; font-weight: 600; border: 1px solid var(--line); background: var(--card2); color: var(--muted); }
+.soc-row { display: flex; align-items: baseline; gap: .4rem; margin-top: .9rem; }
+.soc-num { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
+.soc-sub { margin-left: auto; font-size: .85rem; color: var(--muted); }
+.stats { display: flex; margin-top: 1rem; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stat { flex: 1; padding: .7rem .2rem; text-align: center; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat .label { margin-bottom: .2rem; }
+.stat .v { font-size: 1.05rem; font-weight: 600; color: var(--text); }
+.notes { margin-top: .9rem; display: flex; flex-direction: column; gap: .4rem; }
+.note { font-size: .78rem; color: var(--muted); padding: .1rem 0 .1rem .7rem; border-left: 2px solid var(--line); }
+.note.warn { border-left-color: var(--warn); color: #e0c488; }
+.vdetails { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .7rem; }
+.vdetails summary { cursor: pointer; font-size: .74rem; color: var(--muted); text-transform: uppercase;
+                    letter-spacing: .06em; list-style: none; }
+.vdetails summary::-webkit-details-marker { display: none; }
+.vdetails summary::before { content: "▸ "; }
+.vdetails[open] summary::before { content: "▾ "; }
+.vdetails .meta-row:first-of-type { margin-top: .5rem; }
+.sysline { margin-top: .6rem; text-align: center; font-size: .72rem; color: var(--faint); line-height: 1.7; }
+.sysline b { color: var(--muted); font-weight: 500; }
+.label { font-size: .68rem; color: var(--faint); text-transform: uppercase;
+         letter-spacing: .07em; margin-bottom: .35rem; }
+.value { font-size: 2rem; font-weight: 700; color: var(--text); }
 .value.big { font-size: 3.2rem; }
-.unit { font-size: .95rem; color: #94a3b8; font-weight: 400; }
+.unit { font-size: .95rem; color: var(--muted); font-weight: 400; }
 .bar-wrap {
-  position: relative; background: #334155; border-radius: 999px;
-  height: 10px; margin: .65rem 0 .3rem; overflow: visible;
+  position: relative; background: #1d242d; border-radius: 999px;
+  height: 8px; margin: .8rem 0 .3rem; overflow: visible;
 }
 .bar-zone {
-  position: absolute; top: 0; height: 100%; border-radius: 999px; opacity: .15;
+  position: absolute; top: 0; height: 100%; border-radius: 999px; opacity: .14;
 }
 .bar-fill { height: 100%; border-radius: 999px; transition: width .5s ease; }
 .bar-marker {
-  position: absolute; top: -4px; width: 2px; height: 18px;
+  position: absolute; top: -4px; width: 2px; height: 16px;
   border-radius: 2px; transform: translateX(-50%);
 }
 .bar-labels {
   position: relative; display: flex; justify-content: space-between;
-  font-size: .68rem; color: #475569; margin-top: .25rem;
+  font-size: .66rem; color: var(--faint); margin-top: .35rem;
 }
 .pin-label {
-  position: absolute; transform: translateX(-50%); font-size: .68rem; white-space: nowrap;
+  position: absolute; transform: translateX(-50%); font-size: .66rem; white-space: nowrap;
 }
-.grid3 { display: flex; gap: .6rem; margin-bottom: .85rem; }
-.card.small { flex: 1; text-align: center; padding: .9rem .6rem; }
-.power-row { display: flex; align-items: center; gap: .5rem;
-             font-size: 1.35rem; font-weight: 700; margin-top: .2rem; }
 .meta-row {
-  display: flex; justify-content: space-between; padding: .28rem 0;
-  border-bottom: 1px solid #0f172a; font-size: .8rem; align-items: center;
+  display: flex; justify-content: space-between; padding: .32rem 0;
+  border-bottom: 1px solid var(--line); font-size: .8rem; align-items: center; color: var(--muted);
 }
 .meta-row:last-child { border-bottom: none; }
-.meta-val { color: #94a3b8; text-align: right; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
-.dot.green { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-.dot.red   { background: #ef4444; }
+.meta-val { color: var(--text); text-align: right; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+.dot.green { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.dot.red   { background: var(--bad); }
 .badge {
   display: inline-block; padding: .15rem .55rem; border-radius: 999px;
   font-size: .72rem; font-weight: 600; letter-spacing: .04em;
 }
 .warning-box {
-  background: #2d1f0a; border: 1px solid #92400e; border-radius: 10px;
-  color: #fbbf24; padding: .65rem 1rem; font-size: .8rem; margin-bottom: .85rem;
+  background: #1f1a0e; border: 1px solid #5a4417; border-radius: 10px;
+  color: var(--warn); padding: .65rem 1rem; font-size: .8rem; margin-bottom: .85rem;
 }
 .info-box {
-  background: #0d2137; border: 1px solid #1d4ed8; border-radius: 10px;
-  color: #93c5fd; padding: .65rem 1rem; font-size: .8rem; margin-bottom: .85rem;
+  background: var(--card2); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); padding: .65rem 1rem; font-size: .8rem; margin-bottom: .85rem;
 }
 .error-box {
-  background: #2d1a1a; border: 1px solid #7f1d1d; border-radius: 10px;
-  color: #fca5a5; padding: .7rem 1rem; font-size: .8rem;
+  background: #201212; border: 1px solid #6b2424; border-radius: 10px;
+  color: #f2a0a0; padding: .7rem 1rem; font-size: .8rem;
   margin-bottom: .85rem; word-break: break-word;
 }
 .success-box {
-  background: #14291a; border: 1px solid #166534; border-radius: 10px;
-  color: #86efac; padding: .7rem 1rem; font-size: .8rem; margin-bottom: .85rem;
+  background: #0f1d16; border: 1px solid #1f5b3b; border-radius: 10px;
+  color: #8fe0b4; padding: .7rem 1rem; font-size: .8rem; margin-bottom: .85rem;
 }
-label { display: block; font-size: .8rem; color: #94a3b8;
+label { display: block; font-size: .8rem; color: var(--muted);
         margin-bottom: .3rem; margin-top: .9rem; }
 label:first-of-type { margin-top: 0; }
 .field-row { display: flex; gap: .5rem; }
 .field-row > * { flex: 1; }
 input[type=text], input[type=number], input[type=password], select {
-  width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 8px;
-  color: #f1f5f9; padding: .5rem .8rem; font-size: .88rem; outline: none;
+  width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  color: var(--text); padding: .5rem .8rem; font-size: .88rem; outline: none;
   transition: border-color .15s; appearance: none;
 }
 select { cursor: pointer; }
-input:focus, select:focus { border-color: #3b82f6; }
-.hint { font-size: .72rem; color: #475569; margin-top: .2rem; }
+input:focus, select:focus { border-color: var(--silver); }
+.hint { font-size: .72rem; color: var(--faint); margin-top: .2rem; }
 .section-title {
-  font-size: .72rem; font-weight: 600; color: #475569; text-transform: uppercase;
+  font-size: .72rem; font-weight: 600; color: var(--faint); text-transform: uppercase;
   letter-spacing: .08em; margin: 1.2rem 0 .5rem;
-  border-top: 1px solid #0f172a; padding-top: .8rem;
+  border-top: 1px solid var(--line); padding-top: .8rem;
 }
 button[type=submit] {
-  margin-top: 1.1rem; width: 100%; background: #1e40af; color: #fff;
-  border: none; border-radius: 8px; padding: .6rem; font-size: .92rem;
+  margin-top: 1.1rem; width: 100%; background: var(--text); color: var(--bg);
+  border: none; border-radius: 8px; padding: .6rem; font-size: .92rem; font-weight: 600;
   cursor: pointer; transition: background .15s;
 }
-button[type=submit]:hover { background: #2563eb; }
-.footer { margin-top: 1.2rem; font-size: .7rem; color: #334155; text-align: center; }
+button[type=submit]:hover { background: #ffffff; }
+.footer { margin-top: 1.2rem; font-size: .7rem; color: var(--faint); text-align: center; }
 #countdown { font-variant-numeric: tabular-nums; }
-code { background: #0f172a; padding: .1rem .35rem; border-radius: 4px;
-       font-size: .8rem; color: #94a3b8; }
+code { background: var(--bg); padding: .1rem .35rem; border-radius: 4px;
+       font-size: .8rem; color: var(--muted); }
 .step-badge {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; border-radius: 50%; background: #1e40af;
-  color: #fff; font-size: .72rem; font-weight: 700; margin-right: .4rem;
+  width: 20px; height: 20px; border-radius: 50%; background: var(--text);
+  color: var(--bg); font-size: .72rem; font-weight: 700; margin-right: .4rem;
 }
 """
 
@@ -1395,7 +1429,7 @@ def build_status_page():
             if soc > opt_max:
                 advice = ('Reduce charging limit to protect the battery.' if bat_type == 'NMC'
                           else 'OK for occasional full charge, but limit to 80% for daily use.')
-                warnings += (f'<div class="warning-box">⚠️ '
+                warnings += (f'<div class="note warn">⚠️ '
                              f'{_t("SoC ({soc}%) is above the optimal maximum of {opt_max}% for {bat_type}.", soc=soc, opt_max=opt_max, bat_type=bat_type)} '
                              f'{_t(advice)}</div>')
 
@@ -1404,7 +1438,7 @@ def build_status_page():
                 remind_after = _get_int('FULL_REMINDER_DAYS', bat['full_reminder_days'])
                 if last_full and (time.time() - last_full) / 86400 > remind_after:
                     days_overdue = int((time.time() - last_full) / 86400)
-                    warnings += (f'<div class="info-box">ℹ️ '
+                    warnings += (f'<div class="note">ℹ️ '
                                  f'{_t("LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.", d=days_overdue)}</div>')
 
             # Periodic full charge from PV
@@ -1413,7 +1447,7 @@ def build_status_page():
             fc_on  = _get_int('FULL_CHARGE_DAYS', 0) > 0 or _get_int('FULL_CHARGE_KWH', 0) > 0
             fc_msg = _full_charge_text(fc) if fc_on or fc.get('state') == 'active' else ''
             if fc_msg:
-                warnings += f'<div class="info-box">☀️ {fc_msg}</div>'
+                warnings += f'<div class="note">☀️ {fc_msg}</div>'
 
             # Optimal zone band in bar
             zone_html = (f'<div class="bar-zone" style="left:{opt_min}%;'
@@ -1448,87 +1482,70 @@ def build_status_page():
             history = cfg.get(f'soc_history_{vin}', [])
             chart   = _build_chart(history, opt_min, opt_max)
 
-            bat_badge = (f'<span class="badge" style="background:{bat["color"]}22;'
-                         f'color:{bat["color"]};border:1px solid {bat["color"]}44">'
-                         f'{bat_type}</span>')
+            bat_badge = f'<span class="chip">{bat_type}</span>'
 
-            veh_cols.append(warnings + f"""
-        <div class="card" style="border-color:#334155">
-          <div style="display:flex;align-items:center;margin-bottom:.6rem">
-            {_car_visual(vin, veh_name, bar_color)}
-            <div style="font-size:.85rem;font-weight:600;color:#94a3b8;min-width:0;overflow-wrap:anywhere">
-              {_esc(veh_name)}
-              <div style="font-size:.7rem;font-weight:400;color:#475569">VIN: {_esc(vin)}</div>
+            lc_short = (time.strftime('%H:%M', time.localtime(last_contact)) if last_contact and
+                        datetime.date.fromtimestamp(last_contact) == datetime.date.today()
+                        else time.strftime('%d.%m. %H:%M', time.localtime(last_contact)) if last_contact else '–')
+            shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
+            power_sub = (f'⚡ {_dec(power_w / 1000)} kW' if state == 'Charging' and power_w > 100 else '')
+            odo_str = f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")
+            notes_html = f'<div class="notes">{warnings}</div>' if warnings else ''
+
+            veh_cols.append(f"""
+        <div class="vcard">
+          {_car_visual(vin, veh_name, bar_color)}
+          <div class="vbody">
+            <div class="vhead">
+              <div style="min-width:0">
+                <div class="vname">{_esc(shown_name)}</div>
+                <div class="vvin">{_esc(vin)}</div>
+              </div>
+              <div class="chips">
+                <span class="chip" style="color:{state_color};border-color:{state_color}55">{icon} {state_label}</span>
+                {bat_badge}
+              </div>
             </div>
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
-            <div class="label" style="margin:0">{_t('State of Charge')}</div>
-            {bat_badge}
-          </div>
-          <div class="value big" style="color:{bar_color}">{soc}<span class="unit"> %</span></div>
-          <div class="bar-wrap">
-            {zone_html}
-            <div class="bar-fill" style="width:{soc}%;background:{bar_color};position:relative;z-index:1"></div>
-            {limit_html}
-            {opt_html}
-          </div>
-          <div class="bar-labels">
-            <span>0%</span>
-            {lim_label}
-            {opt_label}
-            <span>100%</span>
-          </div>
-        </div>
-        {power_html}
-        <div class="grid3">
-          <div class="card small">
-            <div class="label">{_t('Range')}</div>
-            <div class="value">{int(range_km)}<span class="unit"> km</span></div>
-          </div>
-          <div class="card small">
-            <div class="label">{_t('Status')}</div>
-            <div class="value" style="font-size:.9em;color:{state_color}">{icon} {state_label}</div>
-          </div>
-          <div class="card small">
-            <div class="label">{_t('Odometer')}</div>
-            <div class="value" style="font-size:1.2rem">{f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")}<span class="unit"> km</span></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="label" style="margin-bottom:.6rem">{_t('SoC History – 7 days')}</div>
-          {chart}
-          <div style="display:flex;gap:1rem;margin-top:.5rem;font-size:.7rem;color:#475569">
-            <span style="color:#22c55e">━</span> {_t('Optimal zone')}
-            <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
-            <span style="color:#38bdf8">━</span> SoC
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="meta-row">
-            <span>{_t('Battery type')}</span>
-            <span class="meta-val">{bat_type} · {_t(bat['note'])}</span>
-          </div>
-          <div class="meta-row">
-            <span>{_t('Optimal range')}</span>
-            <span class="meta-val">{opt_min}% – {opt_max}%</span>
-          </div>
-          <div class="meta-row">
-            <span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span>
-            <span class="meta-val">{ta_str}</span>
-          </div>
-          <div class="meta-row">
-            <span>{_t('Charge cycles')}</span>
-            <span class="meta-val">{cycles_str}</span>
-          </div>
-          <div class="meta-row">
-            <span>{_t('Last full charge')}</span>
-            <span class="meta-val">{lf_str}</span>
-          </div>
-          <div class="meta-row">
-            <span>{_t('Last EV contact')}</span>
-            <span class="meta-val">{lc_str}</span>
+            <div class="soc-row">
+              <span class="soc-num" style="color:{bar_color}">{soc}</span><span class="unit">%</span>
+              <span class="soc-sub">{power_sub}</span>
+            </div>
+            <div class="bar-wrap">
+              {zone_html}
+              <div class="bar-fill" style="width:{soc}%;background:{bar_color};position:relative;z-index:1"></div>
+              {limit_html}
+              {opt_html}
+            </div>
+            <div class="bar-labels">
+              <span>0%</span>
+              {lim_label}
+              {opt_label}
+              <span>100%</span>
+            </div>
+            <div class="stats">
+              <div class="stat"><div class="label">{_t('Range')}</div><div class="v">{int(range_km)} km</div></div>
+              <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
+              <div class="stat"><div class="label">{_t('Last contact')}</div><div class="v">{lc_short}</div></div>
+            </div>
+            {notes_html}
+            <div class="vdetails" style="border-top:none;padding-top:0">
+              <div class="label" style="margin:.9rem 0 .4rem">{_t('SoC History – 7 days')}</div>
+              {chart}
+              <div style="display:flex;gap:1rem;margin-top:.4rem;font-size:.68rem;color:var(--faint)">
+                <span style="color:#22c55e">━</span> {_t('Optimal zone')}
+                <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
+                <span style="color:#e8eaed">━</span> SoC
+              </div>
+            </div>
+            <details class="vdetails">
+              <summary>{_t('Battery type')} · {bat_type}</summary>
+              <div class="meta-row"><span>{_t('Battery type')}</span><span class="meta-val">{bat_type} · {_t(bat['note'])}</span></div>
+              <div class="meta-row"><span>{_t('Optimal range')}</span><span class="meta-val">{opt_min}% – {opt_max}%</span></div>
+              <div class="meta-row"><span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span><span class="meta-val">{ta_str}</span></div>
+              <div class="meta-row"><span>{_t('Charge cycles')}</span><span class="meta-val">{cycles_str}</span></div>
+              <div class="meta-row"><span>{_t('Last full charge')}</span><span class="meta-val">{lf_str}</span></div>
+              <div class="meta-row"><span>{_t('Last EV contact')}</span><span class="meta-val">{lc_str}</span></div>
+            </details>
           </div>
         </div>
 """)
@@ -1537,19 +1554,16 @@ def build_status_page():
         main_cards = ('<div class="vehs">' + ''.join(f'<div class="veh">{c}</div>' for c in veh_cols) + '</div>'
                       if len(veh_cols) > 1 else ''.join(veh_cols))
 
-    # Global meta card (stays narrow and centred under the grid)
+    # System status: one quiet line, details collapsed
     main_cards += f"""
-        <div class="card"{' style="max-width:480px;margin:1rem auto 0"' if len(veh_cols) > 1 else ''}>
-          <div class="meta-row">
-            <span>{_t('Bridge')}</span>
-            <span class="meta-val"><span class="dot green"></span>{_t('Online')}</span>
-          </div>
+        <details class="vdetails" style="max-width:520px;margin:1.2rem auto 0;border-top:1px solid var(--line)">
+          <summary><span class="dot green"></span>{_t('Bridge')} {_t('Online')} · {_t('Data age')} {age}s</summary>
           <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_esc(_get('VRM_SITE_ID','–'))}</span></div>
           <div class="meta-row"><span>{_t('Last update')}</span><span class="meta-val">{ts_str}</span></div>
           <div class="meta-row"><span>{_t('Data age')}</span><span class="meta-val">{age}s</span></div>
           <div class="meta-row"><span>{_t('Next poll')}</span>{next_poll_display}</div>
           <div class="meta-row"><span>{_t('Uptime')}</span><span class="meta-val">{up_str}</span></div>
-        </div>"""
+        </details>"""
 
     body = error_box + main_cards
     return _page('Status', 'status', body, countdown=countdown_val, wide=len(veh_cols) > 1)
@@ -1704,15 +1718,15 @@ def build_settings_page(saved=False, error_msg=''):
     <div class="card">
       <div class="label">{_t('API Endpoints')}</div>
       <div class="meta-row">
-        <span><a href="/" style="color:#3b82f6;text-decoration:none"><code>/</code></a></span>
+        <span><a href="/" style="color:var(--silver);text-decoration:none"><code>/</code></a></span>
         <span class="meta-val">{_t('Status page')}</span>
       </div>
       <div class="meta-row">
-        <span><a href="/api/health" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/health</code></a></span>
+        <span><a href="/api/health" target="_blank" style="color:var(--silver);text-decoration:none"><code>/api/health</code></a></span>
         <span class="meta-val">{_t('Health check (JSON)')}</span>
       </div>
       <div class="meta-row">
-        <span><a href="/api/raw" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/raw</code></a></span>
+        <span><a href="/api/raw" target="_blank" style="color:var(--silver);text-decoration:none"><code>/api/raw</code></a></span>
         <span class="meta-val">{_t('Raw VRM values (debug)')}</span>
       </div>
     </div>
