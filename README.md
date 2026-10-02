@@ -4,17 +4,17 @@
 
 Bringt den Fahrzeugstatus aus Victron VRM in evcc – für Automarken, die VRM anbindet (bisher nur mit Teslas getestet, siehe „Getestet mit“) – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
 
-**Universell:** Ursprünglich entstand der Proxy, um den Fahrzeugstatus (Ladestand, Reichweite, Ladezustand) aus VRM nach evcc zu bekommen. Die Anbindung der einzelnen Hersteller übernimmt VRM. Der Proxy reicht deren Daten im Tesla-Format an evcc weiter und ist deshalb nicht auf eine Marke festgelegt. Die Vollladungs-Automatik ist eine Zusatzfunktion darauf.
-
 ## Warum es dieses Projekt gibt
 
-„Wann habe ich das letzte Mal auf 100 % geladen?“ soll keine weitere Frage sein, an die man denken muss.
+**Der Ausgangspunkt:** evcc braucht den Ladestand und die Reichweite des Autos, um sinnvoll zu laden. Wer ein Victron-System hat, hat das Auto meist schon in VRM: Die Anbindung der einzelnen Hersteller übernimmt VRM. Statt das Auto ein zweites Mal direkt in evcc anzubinden, reicht dieser Proxy die VRM-Daten im Tesla-Format an evcc weiter. Es entsteht keine zweite Verbindung zum Fahrzeug, und der Proxy ist nicht an eine Marke gebunden. Das ist der Kern des Projekts.
+
+**Die Zusatzfunktion:** Auf dieser Brücke sitzt die Vollladungs-Automatik. „Wann habe ich das letzte Mal auf 100 % geladen?“ soll keine weitere Frage sein, an die man denken muss.
 
 Gebaut hat das ein Besitzer von LFP-Elektroautos mit Victron VRM und evcc. LFP-Akkus brauchen regelmäßige Vollladungen für das Balancing der Zellen durch das BMS und die Kalibrierung des Ladestands: Wegen der flachen Spannungskurve zählt das BMS Energie, und diese Schätzung driftet. Der UI-Hinweis im Code nennt grob **3–5 % in 3–4 Wochen oder 100–150 kWh**; das ist keine Messung des eigenen Akkus. Im Alltag lädt man meist nur bis etwa 80 %, um die Zeit bei hohem Ladestand zu begrenzen.
 
 Von Hand bedeutet das: letzte Vollladung merken, einen sonnigen Tag erwischen, das evcc-Limit auf 100 % setzen und später wieder zurückstellen. Der Proxy übernimmt diese Folge: 100 % je Fahrzeug erfassen, die nächste Vollladung fällig stellen, eine passende Solarprognose abwarten, das evcc-Limit vorübergehend anheben und nach Ladeende den Alltagswert wiederherstellen.
 
-Das Ziel ist **zero-touch nach der Einrichtung**: wie gewohnt anstecken; evcc übernimmt das Überschussladen und der Proxy den Zeitpunkt für die Vollladung. Der Betreiber nutzt **14 Tage oder 190 kWh für einen 60-kWh-LFP-Akku**. Das sind einstellbare Werte, keine Standardwerte oder allgemeine Akkuempfehlung. Genügend Sonne und eine passende evcc-Konfiguration bleiben Voraussetzung.
+Das Ziel ist **zero-touch nach der Einrichtung**: wie gewohnt anstecken; evcc übernimmt das Überschussladen und der Proxy den Zeitpunkt für die Vollladung. Der Betreiber nutzt **14 Tage oder 190 kWh für einen 60-kWh-LFP-Akku**. Das sind einstellbare Werte, keine Standardwerte oder allgemeine Akkuempfehlung. Genügend Sonne und eine passende evcc-Konfiguration bleiben Voraussetzung. Wer die Vollladung nicht braucht, setzt beide Schwellen auf 0 und nutzt nur die Brücke.
 
 ## Screenshots
 
