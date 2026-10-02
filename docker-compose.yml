@@ -12,6 +12,7 @@ services:
       - VRM_SITE_ID=${VRM_SITE_ID}
       - POLL_INTERVAL=${POLL_INTERVAL:-60}
       - PORT=${PORT:-8080}
+      - EVCC_URL=${EVCC_URL:-}     # e.g. http://192.168.1.10:7070; empty = evcc features off
       - TZ=${TZ:-Europe/Berlin}   # local time for status page dates ("today", timestamps)
     healthcheck:
       test: ["CMD", "python", "/app/app.py", "--healthcheck"]

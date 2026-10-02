@@ -101,6 +101,18 @@ Benötigt `EVCC_URL`, z. B. `http://evcc.example:7070`. Ladepunktnummern `<n>` b
 
 Die Fahrzeugzuordnung nutzt Reichweite und bei Bedarf SoC; mehrdeutige Treffer werden übersprungen. VRM kann die Stationsverbindung eines früheren Autos behalten: Stationsdaten erhält das Fahrzeug mit eigener Aktivität, sonst der zuletzt kontaktierte Kandidat. Andere Kandidaten übernehmen diese Stationswerte nicht; ihr eigener VRM-Ladezustand wird weiterhin ausgewertet.
 
+## Wie der Proxy dein evcc-Fahrzeug findet
+
+Damit der Proxy auf jeder Installation das Limit ändern kann, braucht er den **Fahrzeugnamen in evcc** (Aufruf `POST /api/vehicles/<name>/limitsoc/…`). Er findet ihn selbst:
+
+1. **evcc-Adresse:** `EVCC_URL` (in `.env` oder in den Einstellungen).
+2. **Zuordnung VIN → evcc-Fahrzeug**, auf zwei Wegen:
+   - **Sofort über die evcc-Datenbank:** das evcc-Datenverzeichnis nur lesend einbinden (`./evcc-data:/evcc:ro`). Der Proxy liest daraus die Fahrzeuge samt `vin:`. evcc zeigt die VIN in seiner API ohne Admin-Anmeldung nicht, die Datenbank schon. Dafür muss beim evcc-Fahrzeug `vin:` eingetragen sein.
+   - **Durch Lernen, ohne Datenbank:** sobald evcc ein Auto an einem Ladepunkt zeigt, ordnet der Proxy es über Reichweite und Ladestand dem VRM-Auto zu und merkt sich das. Mehrdeutige Treffer, etwa zwei fast gleich geladene Autos, überspringt er. Dann hilft die Datenbank.
+3. **Ladepunkt:** Sein Limit liest der Proxy aus dem evcc-Zustand und setzt es bei der Rückstellung zusätzlich zurück.
+
+Das Limit im Auto ändert der Proxy nie. Hat evcc eine Anmeldung, funktioniert die Anbindung nicht: Der Proxy sendet keine evcc-Zugangsdaten.
+
 ## Schnellstart
 
 Benötigt Docker, Docker Compose, eine VRM-Anlage mit einem Electric-Vehicle-Gerät und Netzwerkzugriff auf VRM. Die mitgelieferte Compose-Datei nutzt **Host-Netzwerkbetrieb**. Das Dockerfile verwendet Python 3.12 und ausschließlich die Standardbibliothek.
@@ -121,6 +133,8 @@ VRM_SITE_ID=123456
 POLL_INTERVAL=60
 PORT=8080
 TZ=Europe/Berlin
+# evcc-Adresse, optional (leer = evcc-Funktionen aus); alternativ in den Einstellungen setzen
+EVCC_URL=http://evcc.example:7070
 ```
 
 `http://proxy.example:8080/settings` öffnen. Sind beide VRM-Werte leer, leitet `/` zur ersten Einrichtung dorthin weiter. Einstellungen und Verlauf bleiben im Compose-Volume unter `/config` erhalten.

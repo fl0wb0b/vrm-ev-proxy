@@ -101,6 +101,18 @@ Requires `EVCC_URL`, e.g. `http://evcc.example:7070`. Loadpoint numbers `<n>` ar
 
 Vehicle matching uses range, then SoC if necessary; ambiguous matches are skipped. VRM may retain an old car's station connection: station data goes to the vehicle reporting activity, otherwise the most recently contacted candidate. Other candidates do not inherit those station values; their own VRM charging state is still evaluated.
 
+## How the proxy finds your evcc vehicle
+
+To change the limit on any installation, the proxy needs the **vehicle name in evcc** (call `POST /api/vehicles/<name>/limitsoc/…`). It finds it on its own:
+
+1. **evcc address:** `EVCC_URL` (in `.env` or on the settings page).
+2. **Mapping VIN → evcc vehicle**, in two ways:
+   - **Immediately via the evcc database:** mount evcc's data directory read-only (`./evcc-data:/evcc:ro`). The proxy reads the vehicles including `vin:` from it. evcc does not show the VIN in its API without an admin login, but the database has it. The evcc vehicle must have `vin:` set.
+   - **By learning, without the database:** as soon as evcc shows a car on a loadpoint, the proxy matches it to the VRM car by range and state of charge and remembers it. Ambiguous matches, such as two cars at nearly the same charge, are skipped. The database helps then.
+3. **Loadpoint:** the proxy reads its limit from evcc's state and also resets it when restoring.
+
+The proxy never changes the limit inside the car. If evcc requires a login, the connection does not work: the proxy sends no evcc credentials.
+
 ## Quick start
 
 Requires Docker, Docker Compose, a VRM installation exposing an Electric Vehicle device, and network access to VRM. The supplied Compose file uses **host networking**. The Dockerfile runs Python 3.12 with standard-library dependencies only.
@@ -121,6 +133,8 @@ VRM_SITE_ID=123456
 POLL_INTERVAL=60
 PORT=8080
 TZ=Europe/Berlin
+# evcc address, optional (empty = evcc features off); can also be set in the settings page
+EVCC_URL=http://evcc.example:7070
 ```
 
 Open `http://proxy.example:8080/settings`. With both VRM values empty, `/` redirects there for first-run setup. Settings and history persist in the Compose volume mounted at `/config`.
