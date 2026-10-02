@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.14.0"
+VERSION    = "2.15.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -1031,6 +1031,14 @@ CAR_IMAGES = {   # id → label (id is the folder name in that repository)
     'modelx-2021':            'Model X',
     'cybertruck':             'Cybertruck',
 }
+# Pictures shipped with the proxy (images/<id>.jpg), served at /img/<id>.jpg. Match by words in the car's name.
+IMG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images')
+LOCAL_IMAGES = {   # id → (label, name fragments, spaces/dots/dashes removed, lower case)
+    'vw-id4':              ('VW ID.4',              ('id4',)),
+    'kia-ev6':             ('Kia EV6',              ('ev6',)),
+    'hyundai-ioniq5':      ('Hyundai Ioniq 5',      ('ioniq5',)),
+    'ford-mustang-mach-e': ('Ford Mustang Mach-E',  ('mache', 'mustangmach')),
+}
 _VIN_YEAR = {c: 2010 + i for i, c in enumerate('ABCDEFGH')}
 _VIN_YEAR.update({c: 2018 + i for i, c in enumerate('JKLMN')})   # J=2018 … N=2022
 _VIN_YEAR.update({'P': 2023, 'R': 2024, 'S': 2025, 'T': 2026, 'V': 2027, 'W': 2028, 'X': 2029, 'Y': 2030})
@@ -1038,8 +1046,12 @@ _VIN_YEAR.update({'P': 2023, 'R': 2024, 'S': 2025, 'T': 2026, 'V': 2027, 'W': 20
 def _car_image_id(vin, name):
     """The chosen picture ('drawing' = none), else a guess from model and VIN model year."""
     chosen = _load_cfg().get(f'car_image_{vin}')
-    if chosen == 'drawing' or chosen in CAR_IMAGES:   # 'drawing' = the stored value for "no picture"
+    if chosen == 'drawing' or chosen in CAR_IMAGES or chosen in LOCAL_IMAGES:   # 'drawing' = the stored value for "no picture"
         return chosen
+    squashed = re.sub(r'[\s.\-_]', '', (name or '').lower())
+    for img_id, (_label, words) in LOCAL_IMAGES.items():
+        if any(w in squashed for w in words):
+            return img_id
     kind = _car_kind(name, vin)
     year = _VIN_YEAR.get((vin or '  ')[9:10].upper(), 0)
     if kind == 'model3':
@@ -1054,7 +1066,8 @@ def _car_visual(vin, name, charging=False):
     img_id = _car_image_id(vin, name)
     url = str(_load_cfg().get(f'car_image_url_{vin}') or '')
     if not url.startswith(('http://', 'https://')):
-        url = CAR_IMAGE_URL.format(id=img_id) if img_id in CAR_IMAGES else ''
+        url = (CAR_IMAGE_URL.format(id=img_id) if img_id in CAR_IMAGES
+               else f'/img/{img_id}.jpg' if img_id in LOCAL_IMAGES else '')
     if not url:
         return '<div class="vhero none"></div>'
     return (f'<div class="vhero{" charging" if charging else ""}">'
@@ -1605,7 +1618,8 @@ def build_settings_page(saved=False, error_msg=''):
     car_rows = []
     for vin, veh in (_cache.get('vehicles') or {}).items():
         current = _load_cfg().get(f'car_image_{vin}') or 'auto'
-        opts = [('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('No picture'))] + list(CAR_IMAGES.items())
+        opts = ([('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('No picture'))]
+                + [(k, v[0]) for k, v in LOCAL_IMAGES.items()] + list(CAR_IMAGES.items()))
         options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(v)}</option>' for k, v in opts)
         car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:#475569;font-size:.7rem">{_esc(vin)}</span></label>'
                         f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>'
@@ -1839,7 +1853,7 @@ def _parse_settings(params):
             updates[f'car_image_url_{key[14:]}'] = val or None
         elif key.startswith('CAR_IMAGE_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[10:]):
             val = val.strip()
-            if val not in ('auto', 'drawing') and val not in CAR_IMAGES:
+            if val not in ('auto', 'drawing') and val not in CAR_IMAGES and val not in LOCAL_IMAGES:
                 return {}, _t('Unknown vehicle picture: {v}', v=val)
             updates[f'car_image_{key[10:]}'] = None if val == 'auto' else val
     token = params.get('VRM_TOKEN', '').strip()
@@ -1885,6 +1899,12 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json({'response': {'response': {'charge_state': veh['data']}}},
                        headers={'X-Data-Age-Seconds': str(age)})
+        elif re.fullmatch(r'/img/([a-z0-9-]+)\.jpg', path) and re.fullmatch(r'/img/([a-z0-9-]+)\.jpg', path).group(1) in LOCAL_IMAGES:
+            try:
+                with open(os.path.join(IMG_DIR, path[5:]), 'rb') as f:
+                    self._send(200, 'image/jpeg', f.read(), headers={'Cache-Control': 'public, max-age=86400'})
+            except OSError:
+                self.send_response(404); self.end_headers()
         elif path == '/api/health':
             with _lock:
                 ok    = bool(_cache['vehicles'])
@@ -1950,7 +1970,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        if 'Cache-Control' not in (headers or {}):
+            self.send_header('Cache-Control', 'no-store')
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()

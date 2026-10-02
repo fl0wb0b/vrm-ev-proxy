@@ -18,6 +18,8 @@ EV Manufacturer API
 
 ---
 
+**Vehicle pictures:** the status page shows a picture per car. Tesla models use Tesla's own renderings from `teslamotors/custom-wraps` (loaded by the browser from GitHub, not stored here); VW ID.4, Kia EV6, Hyundai Ioniq 5 and Ford Mustang Mach-E are shipped in `images/` (768 px JPEG, served at `/img/<id>.jpg`) and picked automatically by the car's name. Settings → *Vehicle pictures* chooses one per car, or sets your own picture URL (wins over the choice).
+
 ## Install
 
 **Requires:** Docker + Docker Compose · Supports `linux/amd64` and `linux/arm64` (Raspberry Pi)
