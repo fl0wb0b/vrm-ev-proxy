@@ -52,7 +52,7 @@ All screenshots use **invented demo data**: `VF1DEMO…` VINs, site ID `123456`,
 2. **Become due by time or energy.** `FULL_CHARGE_DAYS` counts calendar days from the last full charge; `FULL_CHARGE_KWH` counts charged energy since then. Either threshold is enough. Energy comes from evcc sessions plus observed SoC gains × capacity while the car reports charging away from the site. This accounts for use as well as time. With no recorded full charge, the first evaluation provides the time reference.
 3. **Wait for a suitable solar day.** At most every five minutes, the proxy checks evcc's forecast and a connected loadpoint with the mapped vehicle. It subtracts house base load (default 1500 W), caps surplus at loadpoint power and trusts 80 % of the remainder. The missing battery energy is calculated with 90 % charging efficiency. The remaining forecast must cover it, and the **current forecast slot** must exceed base load. This daytime check does not measure sunshine or actual PV power.
 4. **Raise only the evcc vehicle limit.** The proxy remembers its previous limit and sets it to 100 %. It creates no plan and changes no charging mode, tariff setting or current. **Configure evcc for surplus charging in `pv` mode**, without plans or smart-cost settings that permit grid charging; evcc remains responsible for the energy source. The limit inside the car must already allow 100 %.
-5. **Let the car finish balancing.** Tesla can report 100 % before topping off has finished. The proxy waits until VRM reports 100 % and no vehicle charging for **30 minutes**; a charging report resets this timer. It then restores the saved value to the evcc vehicle **and**, if still connected, its loadpoint. Both writes matter: evcc otherwise does not pass a reduced vehicle limit to an already connected loadpoint.
+5. **Let the car finish balancing.** Some cars report 100 % before topping off has finished (Tesla, for example). The proxy waits until VRM reports 100 % and no vehicle charging for **30 minutes**; a charging report resets this timer. It then restores the saved value to the evcc vehicle **and**, if still connected, its loadpoint. Both writes matter: evcc otherwise does not pass a reduced vehicle limit to an already connected loadpoint.
 6. **End the attempt when appropriate.** The saved limit also returns when the feature is disabled, on a new day, or below 100 % when forecast surplus remaining today falls below 0.5 kWh. After 100 % has been recorded during the attempt, unplugging or driving also ends it. **Unplugging before 100 % does not immediately cancel it; a passing cloud does not either.** An unfinished full charge remains due and can be attempted again on a suitable sunny day.
 
 Implemented in [`poll_vrm` and `_full_charge_pv`](app.py). Restoration saves an evcc vehicle limit of **1–99 %**; it does not save a separate previous loadpoint limit. Set a daily vehicle limit such as 80 % before enabling the feature.
@@ -125,7 +125,7 @@ TZ=Europe/Berlin
 
 Open `http://proxy.example:8080/settings`. With both VRM values empty, `/` redirects there for first-run setup. Settings and history persist in the Compose volume mounted at `/config`.
 
-Add a vehicle in evcc; repeat with each vehicle's actual VIN. The values below are placeholders:
+Add a vehicle in evcc; repeat with each vehicle's actual VIN. The `tesla-ble` template is only the technical way to reach the proxy and is correct for **any brand** VRM delivers, not just Tesla. The values below are placeholders:
 
 ```yaml
 vehicles:
