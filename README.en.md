@@ -4,17 +4,17 @@
 
 Brings vehicle status from Victron VRM into evcc – for car brands VRM supports (so far tested with Teslas only, see "Tested with") – and additionally automates periodic full charges for LFP batteries when the solar forecast allows it.
 
-**Universal:** The proxy was originally built to get the vehicle status (state of charge, range, charging state) from VRM into evcc. VRM handles the integration of the individual manufacturers; the proxy passes their data on to evcc in Tesla format and is therefore not tied to one brand. The full-charge automation is an add-on on top.
-
 ## Why this exists
 
-“When did I last charge to 100 %?” should not be another thing to remember.
+**The starting point:** evcc needs the car's state of charge and range to charge sensibly. Anyone with a Victron system usually already has the car in VRM: VRM handles the integration of the individual manufacturers. Instead of connecting the car a second time directly in evcc, this proxy passes the VRM data on to evcc in Tesla format. No second connection to the vehicle is created, and the proxy is not tied to one brand. That is the core of the project.
+
+**The add-on:** the full-charge automation sits on top of this bridge. "When did I last charge to 100 %?" should not be another thing to remember.
 
 This was built by an owner of LFP electric cars using Victron VRM and evcc. LFP batteries need periodic full charges for BMS cell balancing and SoC calibration: their flat voltage curve makes the BMS depend on counting energy, and that estimate drifts. The code's UI hint gives a rough estimate of **3–5 % in 3–4 weeks or 100–150 kWh**; this is not a measurement of your battery. Everyday charging usually stops around 80 % to reduce time at high SoC.
 
 Doing this manually means remembering the last full charge, finding a sunny day, raising the evcc limit to 100 %, and remembering to put it back. The proxy handles that sequence: record 100 % per vehicle, decide when another full charge is due, wait for a suitable solar forecast, temporarily raise the evcc limit, and restore the daily value after charging finishes.
 
-The goal is **zero-touch after setup**: plug in as usual; evcc handles surplus charging, and the proxy handles when to allow a full charge. The operator uses **14 days or 190 kWh for a 60 kWh LFP battery**. These are adjustable choices, not defaults or a universal battery recommendation. Enough sunshine and the right evcc setup remain prerequisites.
+The goal is **zero-touch after setup**: plug in as usual; evcc handles surplus charging, and the proxy handles when to allow a full charge. The operator uses **14 days or 190 kWh for a 60 kWh LFP battery**. These are adjustable choices, not defaults or a universal battery recommendation. Enough sunshine and the right evcc setup remain prerequisites. If you do not need the full charge, set both thresholds to 0 and use only the bridge.
 
 ## Screenshots
 
