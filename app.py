@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.16.1"
+VERSION    = "2.16.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -1313,6 +1313,7 @@ nav a:focus-visible, .vdetails summary:focus-visible, a:focus-visible { outline:
 .vdetails summary::-webkit-details-marker { display: none; }
 .vdetails summary::before { content: "▸ "; }
 .vdetails[open] summary::before { content: "▾ "; }
+.vd-title { font-size: .74rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .vdetails .meta-row:first-of-type { margin-top: .5rem; }
 .legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: .4rem 0 .9rem; font-size: .76rem; color: var(--faint); }
 .data-status { text-align: center; font-size: .85rem; color: var(--faint); margin: -.6rem 0 1rem; }
@@ -1705,8 +1706,8 @@ def build_status_page():
             </div>
           </div>
           <div class="vi last">
-            <details class="vdetails">
-              <summary>{_t('Details & history')}</summary>
+            <div class="vdetails">
+              <div class="vd-title">{_t('Details & history')}</div>
               <div class="stats" data-u="{_esc(vin)}:stats">
                 <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
                 <div class="stat"><div class="label">{_t('Last EV contact')}</div><div class="v">{lc_short}</div></div>
@@ -1720,7 +1721,7 @@ def build_status_page():
               <div class="meta-row"><span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span><span class="meta-val">{ta_str}</span></div>
               <div class="meta-row"><span>{_t('Charge cycles')}</span><span class="meta-val">{cycles_str}</span></div>
               <div class="meta-row"><span>{_t('Last full charge')}</span><span class="meta-val">{lf_str}</span></div>
-            </details>
+            </div>
           </div>
         </div>
 """)
