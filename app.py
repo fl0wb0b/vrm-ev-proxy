@@ -16,9 +16,10 @@ import threading
 import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.16.2"
+VERSION    = "2.16.3"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -270,6 +271,31 @@ def _evcc_sessions(url):
 
 EVCC_LIVE_EVERY = 20   # seconds between reads of EVCC's state for the status page
 
+def _evcc_state(url, timeout):
+    """EVCC's /api/state as (state, None), or (None, (message, format args)) when the address is wrong:
+    unreachable, an error status (wrong port/path, login required) or an answer that is not EVCC."""
+    if not url.startswith(('http://', 'https://')):
+        return None, ('EVCC_URL "{url}" must start with http:// or https://.', {'url': url})
+    try:
+        with urlopen(Request(f'{url}/api/state'), timeout=timeout) as resp:
+            state = json.loads(resp.read())
+    except HTTPError as exc:
+        if exc.code in (401, 403):
+            return None, ('EVCC at {url} requires a login (HTTP {code}) – the proxy sends no EVCC credentials.',
+                          {'url': url, 'code': exc.code})
+        return None, ('EVCC answers HTTP {code} at {url}/api/state – check EVCC_URL (address and port, no extra path).',
+                      {'url': url, 'code': exc.code})
+    except ValueError:
+        return None, ('{url}/api/state does not return EVCC data – check EVCC_URL (address and port, no extra path).',
+                      {'url': url})
+    except Exception as exc:
+        return None, ('EVCC not reachable at {url}: {err}', {'url': url, 'err': getattr(exc, 'reason', exc)})
+    state = state.get('result', state) if isinstance(state, dict) else None
+    if not isinstance(state, dict) or 'loadpoints' not in state:
+        return None, ('{url}/api/state does not look like EVCC – check EVCC_URL (address and port, no extra path).',
+                      {'url': url})
+    return state, None
+
 def _evcc_live(url):
     """What the status page needs from EVCC's state, cached a few seconds: solar share of the running
     session and the effective charge limit per EVCC vehicle, and the vehicle titles. {} if EVCC is down."""
@@ -279,10 +305,11 @@ def _evcc_live(url):
     if now - ts < EVCC_LIVE_EVERY:
         return data
     data = {}
-    try:
-        with urlopen(Request(f'{url}/api/state'), timeout=4) as resp:
-            state = json.loads(resp.read())
-        state = state.get('result', state)
+    state, problem = _evcc_state(url, 4)
+    if problem:
+        data = {'problem': problem}
+        print('[LIVE] ' + problem[0].format(**problem[1]), flush=True)
+    else:
         data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()}}
         for point in state.get('loadpoints') or []:
             name = point.get('vehicleName')
@@ -290,8 +317,6 @@ def _evcc_live(url):
                 data['limit'][name] = int(_num(point.get('effectiveLimitSoc'), 0)) or None
                 if point.get('charging'):
                     data['solar'][name] = point.get('sessionSolarPercentage')
-    except Exception as exc:
-        print(f'[LIVE] EVCC state query failed: {exc}', flush=True)
     with _lock:
         _cache['evcc_live'] = (now, data)
     return data
@@ -355,12 +380,9 @@ def _full_charge_pv(vehicles):
         if now - _cache['full_charge_ts'] < FULL_CHARGE_CHECK_EVERY:
             return
         _cache['full_charge_ts'] = now
-    try:
-        with urlopen(Request(f'{url}/api/state'), timeout=5) as resp:
-            state = json.loads(resp.read())
-        state = state.get('result', state)
-    except Exception as exc:
-        print(f'[FULL] EVCC state query failed: {exc}', flush=True)
+    state, problem = _evcc_state(url, 5)
+    if problem:
+        print('[FULL] ' + problem[0].format(**problem[1]), flush=True)
         return
     evcc_vehicles = state.get('vehicles') or {}
     points = state.get('loadpoints') or []
@@ -659,6 +681,16 @@ _DE = {
         'Seit der letzten 100-%-Ladung geladene Energie – EVCC-Ladevorgänge plus Supercharger (aus dem SoC). Das BMS verrutscht mit der Zeit und mit der geladenen Energie; was zuerst erreicht ist, macht die Vollladung fällig. 0 = nur Tage.',
     'after {lim} kWh charged (so far {kwh} kWh)': 'ab {lim} kWh geladen (bisher {kwh} kWh)',
     ' or ': ' oder ',
+    'EVCC at {url} requires a login (HTTP {code}) – the proxy sends no EVCC credentials.':
+        'EVCC unter {url} verlangt eine Anmeldung (HTTP {code}) – der Proxy sendet keine EVCC-Zugangsdaten.',
+    'EVCC answers HTTP {code} at {url}/api/state – check EVCC_URL (address and port, no extra path).':
+        'EVCC antwortet unter {url}/api/state mit HTTP {code} – EVCC_URL prüfen (Adresse und Port, kein zusätzlicher Pfad).',
+    '{url}/api/state does not return EVCC data – check EVCC_URL (address and port, no extra path).':
+        '{url}/api/state liefert keine EVCC-Daten – EVCC_URL prüfen (Adresse und Port, kein zusätzlicher Pfad).',
+    '{url}/api/state does not look like EVCC – check EVCC_URL (address and port, no extra path).':
+        '{url}/api/state sieht nicht nach EVCC aus – EVCC_URL prüfen (Adresse und Port, kein zusätzlicher Pfad).',
+    'EVCC not reachable at {url}: {err}': 'EVCC unter {url} nicht erreichbar: {err}',
+    'EVCC_URL "{url}" must start with http:// or https://.': 'EVCC_URL „{url}“ muss mit http:// oder https:// beginnen.',
     'Next full charge from PV due: {t}.': 'Nächste Vollladung mit PV fällig: {t}.',
     'Subtracted from the solar forecast – house consumption the car cannot use.':
         'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
@@ -1520,7 +1552,10 @@ def build_status_page():
         status_txt, status_cls = _t('VRM poll {t} ago', t=_ago(age)), ''
     data_status = f'<div class="data-status {status_cls}" data-u="data-status">{status_txt}</div>'
     evcc_url = str(_get('EVCC_URL', '')).rstrip('/')
-    live     = _evcc_live(evcc_url) if evcc_url and vehicles else {}
+    live     = _evcc_live(evcc_url) if evcc_url else {}
+    problem  = live.get('problem')
+    evcc_box = ('<div data-u="evcc-error">' + (f'<div class="error-box">⚠️ {_esc(_t(problem[0], **problem[1]))}</div>'
+                                              if problem else '') + '</div>')
     sessions = _evcc_sessions(evcc_url) if evcc_url and vehicles else []
 
     # Build next poll / retry display
@@ -1743,7 +1778,7 @@ def build_status_page():
           </div>
         </details>"""
 
-    body = data_status + error_box + main_cards
+    body = data_status + error_box + evcc_box + main_cards
     return _page('Status', 'status', body, countdown=countdown_val, wide=len(veh_cols) > 1)
 
 
@@ -2182,7 +2217,6 @@ def _healthcheck():
     Reads the port from settings.json too, so a port changed in the UI is honoured.
     VRM errors (HTTP 503) still count as alive – restarting won't fix VRM."""
     import sys
-    from urllib.error import HTTPError
     try:
         urlopen(f'http://127.0.0.1:{_get_int("PORT", 8080)}/api/health', timeout=5)
     except HTTPError:
