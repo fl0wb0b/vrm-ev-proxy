@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-vrm-ev-proxy v2.11.0
+vrm-ev-proxy v2.11.2
 Polls Victron VRM Cloud and serves a vehicle HTTP API for EVCC.
 Supports LFP and NMC battery tracking, SoC history, cycle counting.
 No external dependencies – pure Python stdlib only.
@@ -17,16 +17,16 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.11.1"
+VERSION    = "2.11.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
 # ── Battery type presets ───────────────────────────────────────────────────────
 BATTERY_PRESETS = {
     'LFP': {'opt_min': 10, 'opt_max': 80, 'full_reminder_days': 28,
-            'color': '#22d3ee', 'label': 'LFP', 'note': 'Full charge recommended every 4 weeks for BMS balancing'},
+            'color': '#22d3ee', 'note': 'Full charge recommended every 4 weeks for BMS balancing'},
     'NMC': {'opt_min': 20, 'opt_max': 90, 'full_reminder_days': None,
-            'color': '#a78bfa', 'label': 'NMC', 'note': 'Keep below 90% for longevity. Avoid prolonged time above 80%.'},
+            'color': '#a78bfa', 'note': 'Keep below 90% for longevity. Avoid prolonged time above 80%.'},
 }
 
 # ── VRM → Tesla state mapping ──────────────────────────────────────────────────
@@ -599,7 +599,7 @@ _DE = {
     'Full charge due – starts today once there is enough sun.': 'Vollladung fällig – startet heute, sobald genug Sonne da ist.',
     'Interface': 'Oberfläche', 'Language': 'Sprache',
     'Save Settings': 'Einstellungen speichern',
-    'API Endpoints': 'API-Endpunkte', 'view live ↗': 'live ansehen ↗',
+    'API Endpoints': 'API-Endpunkte',
     'Status page': 'Statusseite', 'Health check (JSON)': 'Health-Check (JSON)',
     # validation messages
     'VRM Site ID must be numeric.': 'Die VRM Site-ID muss eine Zahl sein.',
@@ -608,9 +608,6 @@ _DE = {
     '{key}: "{raw}" is not a valid number.': '{key}: „{raw}“ ist keine gültige Zahl.',
     '{key} must be between {lo} and {hi}.': '{key} muss zwischen {lo} und {hi} liegen.',
     'Optimal minimum must be lower than optimal maximum.': 'Das optimale Minimum muss unter dem Maximum liegen.',
-    # API page
-    'Endpoints': 'Endpunkte', 'Status page (UI)': 'Statusseite (UI)', 'Settings (UI)': 'Einstellungen (UI)',
-    'Health check · JSON': 'Health-Check · JSON', 'open ↗': 'öffnen ↗', 'age: {age}s': 'Alter: {age}s',
     'Raw VRM values (debug)': 'VRM-Rohwerte (Debug)',
 }
 _WEEKDAYS = {'de': ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So']}
@@ -1198,7 +1195,6 @@ def _page(title, nav_active, body, countdown=0):
   <nav>
     <a href="/"         class="{'active' if nav_active=='status'   else ''}">📊 {_t('Status')}</a>
     <a href="/settings" class="{'active' if nav_active=='settings' else ''}">⚙️ {_t('Settings')}</a>
-    <a href="/api"      class="{'active' if nav_active=='api'      else ''}">🔗 API</a>
   </nav>
   {body}
   <div class="footer">{APP_NAME} v{VERSION}</div>
@@ -1243,10 +1239,9 @@ def build_status_page():
     error_box = f'<div class="error-box">⚠️ {_esc(error)}</div>' if error else ''
 
     # Build next poll / retry display
-    if error and error_count > 0:
-        next_poll_display = f'<span class="meta-val" id="countdown">{_t("in {n}s (attempt {count})", n=next_poll, count=error_count)}</span>'
-    else:
-        next_poll_display = f'<span class="meta-val" id="countdown">{_t("in {n}s", n=next_poll)}</span>'
+    poll_text = (_t("in {n}s (attempt {count})", n=next_poll, count=error_count)
+                 if error and error_count > 0 else _t("in {n}s", n=next_poll))
+    next_poll_display = f'<span class="meta-val" id="countdown">{poll_text}</span>'
     countdown_val = next_poll + 2   # reload shortly after the poll has finished
 
     main_cards = ''
@@ -1455,24 +1450,23 @@ def build_status_page():
 
 # ── Settings page ──────────────────────────────────────────────────────────────
 def build_settings_page(saved=False, error_msg=''):
-    cfg      = _load_cfg()
-    token    = cfg.get('VRM_TOKEN') or os.environ.get('VRM_TOKEN', '')
-    site_id  = cfg.get('VRM_SITE_ID') or os.environ.get('VRM_SITE_ID', '')
-    interval = cfg.get('POLL_INTERVAL') or os.environ.get('POLL_INTERVAL', '60')
-    port     = cfg.get('PORT') or os.environ.get('PORT', '8080')
-    bat_type = cfg.get('BATTERY_TYPE') or os.environ.get('BATTERY_TYPE', 'LFP')
-    capacity = cfg.get('CAPACITY') or os.environ.get('CAPACITY', '')
+    token    = _get('VRM_TOKEN', '')
+    site_id  = _get('VRM_SITE_ID', '')
+    interval = _get('POLL_INTERVAL', '60')
+    port     = _get('PORT', '8080')
+    bat_type = _get('BATTERY_TYPE', 'LFP')
+    capacity = _get('CAPACITY', '')
     bat      = BATTERY_PRESETS.get(bat_type, BATTERY_PRESETS['LFP'])
-    opt_min  = cfg.get('OPT_MIN') or os.environ.get('OPT_MIN', str(bat['opt_min']))
-    opt_max  = cfg.get('OPT_MAX') or os.environ.get('OPT_MAX', str(bat['opt_max']))
-    reminder = cfg.get('FULL_REMINDER_DAYS') or os.environ.get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
+    opt_min  = _get('OPT_MIN', str(bat['opt_min']))
+    opt_max  = _get('OPT_MAX', str(bat['opt_max']))
+    reminder = _get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
-    evcc_url = cfg.get('EVCC_URL') or os.environ.get('EVCC_URL', '')
-    fc_days  = cfg.get('FULL_CHARGE_DAYS') or os.environ.get('FULL_CHARGE_DAYS', '0')
-    fc_kwh   = cfg.get('FULL_CHARGE_KWH') or os.environ.get('FULL_CHARGE_KWH', '0')
-    fc_base  = cfg.get('FULL_CHARGE_BASE_LOAD') or os.environ.get('FULL_CHARGE_BASE_LOAD', '1500')
-    evcc_db  = cfg.get('EVCC_DB') or os.environ.get('EVCC_DB', '')
-    language = cfg.get('LANGUAGE') or os.environ.get('LANGUAGE', 'auto')
+    evcc_url = _get('EVCC_URL', '')
+    fc_days  = _get('FULL_CHARGE_DAYS', '0')
+    fc_kwh   = _get('FULL_CHARGE_KWH', '0')
+    fc_base  = _get('FULL_CHARGE_BASE_LOAD', '1500')
+    evcc_db  = _get('EVCC_DB', '')
+    language = _get('LANGUAGE', 'auto')
     lang_opts = ''.join(f'<option value="{k}" {"selected" if k == language else ""}>{v}</option>'
                         for k, v in LANGUAGES.items())
     # The full token is never sent to the browser – the UI has no login.
@@ -1589,9 +1583,7 @@ def build_settings_page(saved=False, error_msg=''):
     </div>
 
     <div class="card">
-      <div class="label">{_t('API Endpoints')} –
-        <a href="/api" style="color:#3b82f6;font-size:.75rem;text-decoration:none">{_t('view live ↗')}</a>
-      </div>
+      <div class="label">{_t('API Endpoints')}</div>
       <div class="meta-row">
         <span><a href="/" style="color:#3b82f6;text-decoration:none"><code>/</code></a></span>
         <span class="meta-val">{_t('Status page')}</span>
@@ -1599,6 +1591,10 @@ def build_settings_page(saved=False, error_msg=''):
       <div class="meta-row">
         <span><a href="/api/health" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/health</code></a></span>
         <span class="meta-val">{_t('Health check (JSON)')}</span>
+      </div>
+      <div class="meta-row">
+        <span><a href="/api/raw" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/raw</code></a></span>
+        <span class="meta-val">{_t('Raw VRM values (debug)')}</span>
       </div>
     </div>
 
@@ -1615,69 +1611,6 @@ def build_settings_page(saved=False, error_msg=''):
     return _page('Settings', 'settings', body)
 
 
-# ── API overview page ──────────────────────────────────────────────────────────
-def build_api_page():
-    with _lock:
-        vehicles = dict(_cache['vehicles'])
-        ts       = _cache['ts']
-        error    = _cache['error']
-
-    age = int(time.time() - ts) if ts else 0
-
-    health_json  = json.dumps({
-        'status': 'ok' if vehicles else 'error', 'error': error,
-        'data_age': age, 'site_id': _get('VRM_SITE_ID'), 'version': VERSION,
-    }, indent=2)
-
-    # Build vehicle_data JSON showing all cached vehicles
-    if vehicles:
-        vd_payload = {
-            vin: {'response': {'response': {'charge_state': veh['data']}}}
-            for vin, veh in vehicles.items()
-        }
-    else:
-        vd_payload = {'error': error or 'No data yet'}
-    vehicle_json = json.dumps(vd_payload, indent=2)
-
-    body = f"""
-    <div class="card">
-      <div class="label">{_t('Endpoints')}</div>
-      <div class="meta-row">
-        <span><a href="/" style="color:#3b82f6;text-decoration:none"><code>/</code></a></span>
-        <span class="meta-val">{_t('Status page (UI)')}</span>
-      </div>
-      <div class="meta-row">
-        <span><a href="/settings" style="color:#3b82f6;text-decoration:none"><code>/settings</code></a></span>
-        <span class="meta-val">{_t('Settings (UI)')}</span>
-      </div>
-      <div class="meta-row">
-        <span><a href="/api/health" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/health</code></a></span>
-        <span class="meta-val">{_t('Health check · JSON')}</span>
-      </div>
-      <div class="meta-row">
-        <span><a href="/api/raw" target="_blank" style="color:#3b82f6;text-decoration:none"><code>/api/raw</code></a></span>
-        <span class="meta-val">{_t('Raw VRM values (debug)')}</span>
-      </div>
-    </div>
-    <div class="card">
-      <div class="label">GET /api/health – Live
-        <a href="/api/health" target="_blank"
-           style="color:#3b82f6;font-size:.75rem;margin-left:.5rem;text-transform:none">{_t('open ↗')}</a>
-      </div>
-      <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
-                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(health_json)}</pre>
-    </div>
-    <div class="card">
-      <div class="label">GET /api/1/vehicles/&lt;VIN&gt;/vehicle_data – Live
-        <span style="color:#475569;font-size:.72rem">({_t('age: {age}s', age=age)})</span>
-      </div>
-      <pre style="background:#0f172a;border-radius:8px;padding:.85rem;font-size:.78rem;
-                  color:#94a3b8;overflow-x:auto;margin-top:.5rem;line-height:1.5">{_esc(vehicle_json)}</pre>
-    </div>"""
-
-    return _page('API', 'api', body)
-
-
 # ── HTTP Handler ───────────────────────────────────────────────────────────────
 _warned_vins = set()
 
@@ -1692,6 +1625,15 @@ def _find_vehicle(vehicles, vin):
             print(f'[HTTP] VIN {vin} not found in VRM data {list(vehicles)} – '
                   f'serving first vehicle. Check the VIN in EVCC.', flush=True)
     return next(iter(vehicles.values()))
+
+
+def _vin_from_path(path):
+    """VIN aus /api/1/vehicles/<VIN>/... – None, wenn der Pfad keine enthält."""
+    parts = path.split('/')
+    try:
+        return parts[parts.index('vehicles') + 1]
+    except (ValueError, IndexError):
+        return None
 
 
 def _parse_settings(params):
@@ -1754,17 +1696,8 @@ class Handler(BaseHTTPRequestHandler):
             self._html(build_status_page())
         elif path == '/settings':
             self._html(build_settings_page())
-        elif path == '/api':
-            self._html(build_api_page())
         elif '/vehicle_data' in path:
-            # Extract VIN from path: /api/1/vehicles/<VIN>/vehicle_data
-            vin = None
-            parts = path.split('/')
-            try:
-                vi_idx = parts.index('vehicles')
-                vin = parts[vi_idx + 1]
-            except (ValueError, IndexError):
-                pass
+            vin = _vin_from_path(path)   # /api/1/vehicles/<VIN>/vehicle_data
 
             with _lock:
                 vehicles = dict(_cache['vehicles'])
@@ -1833,14 +1766,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._html(build_settings_page(error_msg=str(exc)))
         elif '/command/' in path:
             self._read_body()   # drain request body
-            parts = path.split('/')
-            command = parts[-1] if parts else 'unknown'
-            vin = None
-            try:
-                vi_idx = parts.index('vehicles')
-                vin = parts[vi_idx + 1]
-            except (ValueError, IndexError):
-                pass
+            command = path.split('/')[-1]
+            vin = _vin_from_path(path)
             print(f'[CMD] {command} (VIN={vin}) – no-op, data served from VRM', flush=True)
             self._json({'response': {'result': True, 'reason': '', 'vin': vin or '', 'command': command}})
         else:
