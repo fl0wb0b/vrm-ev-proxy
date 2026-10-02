@@ -121,6 +121,8 @@ VRM_SITE_ID=123456
 POLL_INTERVAL=60
 PORT=8080
 TZ=Europe/Berlin
+# evcc-Adresse, optional (leer = evcc-Funktionen aus); alternativ in den Einstellungen setzen
+EVCC_URL=http://evcc.example:7070
 ```
 
 `http://proxy.example:8080/settings` öffnen. Sind beide VRM-Werte leer, leitet `/` zur ersten Einrichtung dorthin weiter. Einstellungen und Verlauf bleiben im Compose-Volume unter `/config` erhalten.
