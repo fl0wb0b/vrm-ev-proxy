@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.11.3"
+VERSION    = "2.11.4"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -987,6 +987,42 @@ def _full_charge_text(fc):
 
 
 # ── SoC color ──────────────────────────────────────────────────────────────────
+# ── Car silhouettes for the status page ────────────────────────────────────────
+# Own simple drawings, inline: no image downloads (the proxy makes no outside requests)
+# and no third-party artwork. The body takes the SoC colour.
+_TESLA_WMI = ('5YJ', '7SA', 'LRW', 'XP7', 'SFZ')
+
+def _car_kind(name, vin):
+    """'model3', 'modely' or 'car' – from the name VRM gives, else from a Tesla VIN
+    (4th character: 3 = Model 3, Y = Model Y)."""
+    text = (name or '').lower().replace(' ', '')
+    if 'modely' in text: return 'modely'
+    if 'model3' in text: return 'model3'
+    vin = (vin or '').upper()
+    if vin[:3] in _TESLA_WMI and len(vin) > 3:
+        return {'Y': 'modely', '3': 'model3'}.get(vin[3], 'car')
+    return 'car'
+
+_CAR_BODY = {
+    # viewBox 0 0 120 44: body path, window path
+    'model3': ('M5 31 C5 27 8 25 15 24 L36 18 C43 13 51 11 61 11 L79 11 C87 11 93 15 99 21 L110 24 C114 25 116 27 116 31 L116 34 L5 34 Z',
+               'M40 19 C46 15 52 14 60 14 L77 14 C83 14 87 17 91 21 L40 21 Z'),
+    'modely': ('M5 31 C5 27 8 24 15 23 L34 16 C40 10 50 8 61 8 L88 8 C97 9 105 15 109 23 L112 25 C115 26 116 28 116 31 L116 34 L5 34 Z',
+               'M38 17 C44 12 52 11 61 11 L86 11 C93 12 99 17 102 22 L38 22 Z'),
+    'car':    ('M5 31 C5 27 8 25 15 24 L38 18 C44 14 52 12 62 12 L80 12 C88 12 94 16 99 21 L108 24 C113 25 116 27 116 31 L116 34 L5 34 Z',
+               'M42 19 C47 16 53 15 61 15 L78 15 C84 15 88 18 92 21 L42 21 Z'),
+}
+
+def _car_svg(kind, color):
+    body, window = _CAR_BODY.get(kind, _CAR_BODY['car'])
+    return (f'<svg viewBox="0 0 120 44" width="78" height="29" role="img" aria-hidden="true" '
+            f'style="flex:none;margin-right:.7rem">'
+            f'<path d="{body}" fill="{color}" fill-opacity=".85"/>'
+            f'<path d="{window}" fill="#0f172a" fill-opacity=".55"/>'
+            f'<circle cx="28" cy="34" r="7.5" fill="#0f172a" stroke="#475569" stroke-width="2"/>'
+            f'<circle cx="94" cy="34" r="7.5" fill="#0f172a" stroke="#475569" stroke-width="2"/></svg>')
+
+
 def _soc_color(soc):
     bat     = _bat()
     opt_min = _get_int('OPT_MIN', bat['opt_min'])
@@ -1359,9 +1395,12 @@ def build_status_page():
 
             main_cards += warnings + f"""
         <div class="card" style="border-color:#334155">
-          <div style="font-size:.85rem;font-weight:600;color:#94a3b8;margin-bottom:.6rem">
-            🚗 {_esc(veh_name)}
-            <span style="font-size:.7rem;color:#475569;margin-left:.5rem">VIN: {_esc(vin)}</span>
+          <div style="display:flex;align-items:center;margin-bottom:.6rem">
+            {_car_svg(_car_kind(veh_name, vin), bar_color)}
+            <div style="font-size:.85rem;font-weight:600;color:#94a3b8">
+              {_esc(veh_name)}
+              <div style="font-size:.7rem;font-weight:400;color:#475569">VIN: {_esc(vin)}</div>
+            </div>
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
             <div class="label" style="margin:0">{_t('State of Charge')}</div>
