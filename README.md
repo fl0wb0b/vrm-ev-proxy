@@ -106,9 +106,8 @@ Die Fahrzeugzuordnung nutzt Reichweite und bei Bedarf SoC; mehrdeutige Treffer w
 Damit der Proxy auf jeder Installation das Limit ändern kann, braucht er den **Fahrzeugnamen in evcc** (Aufruf `POST /api/vehicles/<name>/limitsoc/…`). Er findet ihn selbst:
 
 1. **evcc-Adresse:** `EVCC_URL` (in `.env` oder in den Einstellungen).
-2. **Zuordnung VIN → evcc-Fahrzeug**, auf zwei Wegen:
-   - **Sofort über die evcc-Datenbank:** das evcc-Datenverzeichnis nur lesend einbinden (`./evcc-data:/evcc:ro`). Der Proxy liest daraus die Fahrzeuge samt `vin:`. evcc zeigt die VIN in seiner API ohne Admin-Anmeldung nicht, die Datenbank schon. Dafür muss beim evcc-Fahrzeug `vin:` eingetragen sein.
-   - **Durch Lernen, ohne Datenbank:** sobald evcc ein Auto an einem Ladepunkt zeigt, ordnet der Proxy es über Reichweite und Ladestand dem VRM-Auto zu und merkt sich das. Mehrdeutige Treffer, etwa zwei fast gleich geladene Autos, überspringt er. Dann hilft die Datenbank.
+2. **Zuordnung VIN → evcc-Fahrzeug:**
+   - **Durch Lernen:** sobald evcc ein Auto an einem Ladepunkt zeigt, ordnet der Proxy es über Reichweite und Ladestand dem VRM-Auto zu und merkt sich das. Mehrdeutige Treffer, etwa zwei fast gleich geladene Autos, überspringt er. Dann hilft die Handauswahl (Punkt 4).
 3. **Ladepunkt:** Sein Limit liest der Proxy aus dem evcc-Zustand und setzt es bei der Rückstellung zusätzlich zurück.
 
 4. **Von Hand, wenn die Erkennung nicht reicht:** In den Einstellungen gibt es einen Abschnitt **Fahrzeuge** mit einer Zeile je VIN: Bild/Modell, **Fahrzeug in EVCC** (die Liste kommt aus einem Scan von evcc), **Akkutyp** und **Akkukapazität**. Was auf „Automatisch“ bleibt, wird erkannt. Darunter wählt **Gesteuerte Ladepunkte** aus dem Scan, an welchen Wallboxen der Proxy Limits ändern und die Fahrzeugerkennung neu anstoßen darf. Standard sind alle.
@@ -157,7 +156,7 @@ vehicles:
 
 Bei `tesla-ble` **den Port aus `url` weglassen**: Das Template hängt das separate `port` an. Diese Schnittstelle liefert Daten; Fahrzeugbefehle werden als No-Ops bestätigt.
 
-In den Proxy-Einstellungen `EVCC_URL` auf `http://evcc.example:7070` setzen, passende Schwellen wählen und das Alltagslimit am Fahrzeug in evcc einstellen. Für die sofortige VIN-Zuordnung von Fahrzeugen aus der evcc-Datenbank dieses optionale Fragment in den bestehenden Compose-Dienst übernehmen (oder ein Compose-Override nutzen):
+In den Proxy-Einstellungen `EVCC_URL` auf `http://evcc.example:7070` setzen, passende Schwellen wählen und das Alltagslimit am Fahrzeug in evcc einstellen. Alternativ lassen sich diese Werte in den Compose-Dienst schreiben (oder ein Compose-Override nutzen):
 
 ```yaml
 services:
@@ -168,10 +167,7 @@ services:
       FULL_CHARGE_KWH: "190"
     volumes:
       - config:/config
-      - ./example-evcc-data:/evcc:ro
 ```
-
-Das Hostverzeichnis durch das tatsächliche evcc-Datenverzeichnis mit `evcc.db` ersetzen (im evcc-Container `/root/.evcc`); die Einbindung nur lesend belassen. Der Proxy liest Fahrzeugkonfigurationen mit VIN aus der Datenbank. Ohne Einbindung lernt er die Zuordnung, wenn evcc bei einer Vollladeprüfung ein eindeutig passendes Auto am Ladepunkt zeigt.
 
 Für ein Quellcode-Update den Checkout aktualisieren und `docker compose up -d --build` ausführen. Für ein Update des veröffentlichten Images `docker compose pull`, danach `docker compose up -d --no-build` ausführen.
 
@@ -196,7 +192,6 @@ Nicht leere Werte in `/config/settings.json` haben Vorrang vor Umgebungsvariable
 | `FULL_CHARGE_KWH` | `0` (aus); 0–2000 geladene kWh. Jede aktive Schwelle kann das Fahrzeug fällig machen. |
 | `FULL_CHARGE_BASE_LOAD` | `1500` W; Abzug von der Solarprognose, einstellbar 0–20000 W. |
 | `EVCC_URL` | Leer: evcc-Anbindung aus. Beispiel: `http://evcc.example:7070`. |
-| `EVCC_DB` | `/evcc/evcc.db`; optionale Datenbank nur lesend für die VIN-Zuordnung. |
 | `LANGUAGE` | `auto` (Browsersprache), `en` oder `de`; nur die Oberfläche. |
 
 Die mitgelieferte Compose-Datei übergibt nur VRM-Zugang, Abfrageintervall, Port und Zeitzone. Weitere Variablen unter `environment` ergänzen oder die Einstellungsseite nutzen. Bei unbekannter Kapazität nehmen Vollladeplanung und Status-Endzeit 60 kWh an; deshalb eine passende Kapazität hinterlegen. Die API-Zeitschätzung benötigt eine bekannte Kapazität.
@@ -234,7 +229,7 @@ Die Oberfläche warnt nach `max(180 s, 3 × POLL_INTERVAL)` ohne erfolgreichen V
 - **Falsche Uhrzeit/Datumsangaben:** `TZ` in Compose auf die gewünschte Zeitzone setzen und den Container neu erstellen.
 - **evcc-Verbindungsfehler:** `url: http://proxy.example` und `port: 8080` verwenden, ohne den Port in der URL zu wiederholen.
 - **Falsches Fahrzeug:** VIN mit der Proxy-Anzeige abgleichen. Groß-/Kleinschreibung spielt keine Rolle; unbekannte VINs liefern das erste Fahrzeug. Bei mehreren Fahrzeugen wird je unbekannter VIN einmal gewarnt. Mehrdeutige Treffer lösen keine Neuerkennung aus.
-- **Keine evcc-Statistik oder Automatik:** Ist `EVCC_URL` gesetzt, aber falsch (nicht erreichbar, falscher Port oder Pfad, Anmeldung nötig, keine evcc-Antwort), zeigt die Statusseite oben eine rote Fehlermeldung mit dem Grund. Außerdem: `EVCC_URL`, Erreichbarkeit, VIN-Zuordnung und den Datenbankpfad nur lesend prüfen. Der Client sendet keine evcc-Anmeldedaten; eine API mit Authentifizierung schlägt fehl. Im Log nach `[EVCC]`, `[LIVE]` oder `[FULL]` suchen.
+- **Keine evcc-Statistik oder Automatik:** Ist `EVCC_URL` gesetzt, aber falsch (nicht erreichbar, falscher Port oder Pfad, Anmeldung nötig, keine evcc-Antwort), zeigt die Statusseite oben eine rote Fehlermeldung mit dem Grund. Außerdem: `EVCC_URL`, Erreichbarkeit, VIN-Zuordnung (Einstellungen → Fahrzeuge → Fahrzeug in EVCC) prüfen. Der Client sendet keine evcc-Anmeldedaten; eine API mit Authentifizierung schlägt fehl. Im Log nach `[EVCC]`, `[LIVE]` oder `[FULL]` suchen.
 - **Vollladung bleibt fällig:** Prüfen, ob das zugeordnete Auto verbunden ist und evcc eine ausreichende Solarprognose liefert. Im Winter kann das dauern; die Details zeigen dann „fällig“. Das Auto muss selbst 100 % erlauben und evcc PV-Überschussladen nutzen.
 - **Limit kommt nicht zurück:** 30 Minuten nach Ladeende abwarten, evcc-API-Fehler prüfen und `EVCC_URL` eingerichtet lassen. Nur ein gespeichertes Alltagslimit von 1–99 % kann wiederhergestellt werden.
 
@@ -246,7 +241,7 @@ Entwickelt und getestet wurde auf **einer** Installation: Victron EV Charging St
 
 - **Andere Marken in VRM.** Der Proxy liest das VRM-Gerät „Electric Vehicle“ (`/Soc`, Reichweite, `/ChargingState`, optional `/VIN`, `/BatteryCapacity`). Liefert VRM bei einer Marke andere oder weniger Felder, fehlen Werte oder die Zuordnung. Ohne VIN nutzt der Proxy eine Ersatzkennung; die Zuordnung über die evcc-Datenbank geht dann nicht, das Lernen über Reichweite und Ladestand schon.
 - **Andere Wallboxen.** Die Stationslogik (`/Mgmt/Connection`, Status, Sitzungsenergie) gilt nur für Victron-Ladestationen. Für andere Wallboxen kommen Ladeleistung und Ladeziel aus evcc und dem Fahrzeugstatus.
-- **Fahrzeuge aus der `evcc.yaml`.** Die VIN-Zuordnung über die Datenbank sieht nur in der Oberfläche angelegte Fahrzeuge. Bei Fahrzeugen aus der Datei hilft das Lernen (setzt voraus, dass das evcc-Fahrzeug Reichweite und Ladestand **vom Proxy** bezieht, Template `tesla-ble`) oder die **Handauswahl** je Auto in den Einstellungen.
+- **Fahrzeuge aus der `evcc.yaml`.** Bei Fahrzeugen aus der Datei hilft das Lernen (setzt voraus, dass das evcc-Fahrzeug Reichweite und Ladestand **vom Proxy** bezieht, Template `tesla-ble`) oder die **Handauswahl** je Auto in den Einstellungen.
 - **Andere evcc-Versionen.** Gebraucht werden `/api/state` mit Ladepunkten, Fahrzeug-Limit, Solarprognose-Zeitreihe und die Schreibaufrufe unter `/api/vehicles/<name>/limitsoc/…`. Eine Mindestversion ist nicht bestimmt.
 - **Gleiche Fahrzeugtitel.** evcc-Sitzungen werden über den Titel zugeordnet; zwei Autos mit gleichem Titel vermischen ihre kWh.
 - **Akkukapazität.** Reihenfolge: Kapazität des Autos in den Einstellungen, sonst die globale `CAPACITY`, sonst der VRM-Wert, sonst die Kapazität des evcc-Fahrzeugs, zuletzt 60 kWh. Bei verschieden großen Autos je Auto eintragen. Dasselbe gilt für den Akkutyp (LFP/NMC).
