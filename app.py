@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.15.0"
+VERSION    = "2.16.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -268,6 +268,59 @@ def _evcc_sessions(url):
         _cache['evcc_sessions'] = (now, sessions)
     return sessions
 
+EVCC_LIVE_EVERY = 20   # seconds between reads of EVCC's state for the status page
+
+def _evcc_live(url):
+    """What the status page needs from EVCC's state, cached a few seconds: solar share of the running
+    session and the effective charge limit per EVCC vehicle, and the vehicle titles. {} if EVCC is down."""
+    now = time.time()
+    with _lock:
+        ts, data = _cache['evcc_live']
+    if now - ts < EVCC_LIVE_EVERY:
+        return data
+    data = {}
+    try:
+        with urlopen(Request(f'{url}/api/state'), timeout=4) as resp:
+            state = json.loads(resp.read())
+        state = state.get('result', state)
+        data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()}}
+        for point in state.get('loadpoints') or []:
+            name = point.get('vehicleName')
+            if name and point.get('connected'):
+                data['limit'][name] = int(_num(point.get('effectiveLimitSoc'), 0)) or None
+                if point.get('charging'):
+                    data['solar'][name] = point.get('sessionSolarPercentage')
+    except Exception as exc:
+        print(f'[LIVE] EVCC state query failed: {exc}', flush=True)
+    with _lock:
+        _cache['evcc_live'] = (now, data)
+    return data
+
+def _week_stats(sessions, title, now=None):
+    """(kWh, solar share in %) of the sessions of this vehicle started in the last 7 days; None if there are none."""
+    now = now or time.time()
+    kwh = solar = 0.0
+    for sess in sessions:
+        if sess.get('vehicle') != title:
+            continue
+        try:
+            created = datetime.datetime.fromisoformat(str(sess.get('created'))).timestamp()
+        except ValueError:
+            continue
+        if now - 7 * 86400 <= created <= now:
+            e = _num(sess.get('chargedEnergy'), 0)
+            kwh += e
+            solar += e * _num(sess.get('solarPercentage'), 0)
+    return (kwh, solar / kwh) if kwh > 0 else None
+
+def _eta_text(soc, limit, capacity, power_w, now=None):
+    """'80 % um 19:40' for a running charge, or '' when the limit is reached or there is no usable power."""
+    if not limit or not capacity or soc >= limit or power_w < 500:
+        return ''
+    now = now or time.time()
+    hours = (limit - soc) / 100.0 * capacity / (power_w / 1000.0) / 0.92
+    return f'{int(limit)} % ' + _t('at') + ' ' + time.strftime('%H:%M', time.localtime(now + hours * 3600))
+
 def _kwh_since_full(sessions, title, last_full, away_kwh):
     """Energy charged since the last full charge: EVCC sessions of this vehicle started
     after it, plus what the car charged away from home (Supercharger, from its SoC)."""
@@ -479,6 +532,7 @@ _cache = {
     'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
     'evcc_redetect_ts': {},  # EVCC loadpoint -> time of the last vehicle re-detection
     'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
+    'evcc_live': (0.0, {}),   # (time, {'solar': {evcc vehicle: %}, 'limit': {evcc vehicle: %}, 'titles': {evcc vehicle: title}})
     'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
     'full_charge_info': {},  # VIN -> state of the periodic full charge for the status page
     'evcc_sessions': (0.0, []),  # (time read, EVCC charging sessions)
@@ -512,6 +566,7 @@ _req = threading.local()   # per-request language, set by the HTTP handler
 
 # English source text → German. Placeholders use str.format syntax.
 _DE = {
+    'This week': 'Diese Woche', 'at': 'um',
     'Own picture URL (optional, wins over the choice)': 'Eigene Bild-URL (optional, hat Vorrang)',
     'Picture URL must start with http:// or https://.': 'Die Bild-URL muss mit http:// oder https:// beginnen.',
     'Last contact': 'Letzter Kontakt',
@@ -1038,6 +1093,9 @@ LOCAL_IMAGES = {   # id → (label, name fragments, spaces/dots/dashes removed, 
     'kia-ev6':             ('Kia EV6',              ('ev6',)),
     'hyundai-ioniq5':      ('Hyundai Ioniq 5',      ('ioniq5',)),
     'ford-mustang-mach-e': ('Ford Mustang Mach-E',  ('mache', 'mustangmach')),
+    'mini-countryman':     ('Mini Countryman',      ('countryman', 'minicooper', 'miniaceman')),
+    'porsche-macan':       ('Porsche Macan',        ('macan',)),
+    'volvo-ex40':          ('Volvo EX40 / XC40',    ('ex40', 'xc40')),
 }
 _VIN_YEAR = {c: 2010 + i for i, c in enumerate('ABCDEFGH')}
 _VIN_YEAR.update({c: 2018 + i for i, c in enumerate('JKLMN')})   # J=2018 … N=2022
@@ -1069,8 +1127,8 @@ def _car_visual(vin, name, charging=False):
         url = (CAR_IMAGE_URL.format(id=img_id) if img_id in CAR_IMAGES
                else f'/img/{img_id}.jpg' if img_id in LOCAL_IMAGES else '')
     if not url:
-        return '<div class="vhero none"></div>'
-    return (f'<div class="vhero{" charging" if charging else ""}">'
+        return f'<div class="vhero none" data-u="{_esc(vin)}:hero"></div>'
+    return (f'<div class="vhero{" charging" if charging else ""}" data-u="{_esc(vin)}:hero">'
             f'<img src="{_esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
             f'onerror="this.parentNode.className=\'vhero none\'" '
             f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 53%"></div>')
@@ -1209,7 +1267,8 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
         font-size: .72rem; font-weight: 600; border: 1px solid var(--line); background: var(--card2); color: var(--muted); }
 .soc-row { display: flex; align-items: baseline; gap: .4rem; padding-top: .9rem; }
 .soc-num { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
-.soc-sub { margin-left: auto; font-size: .85rem; color: var(--muted); }
+.soc-sub { margin-left: auto; font-size: .85rem; color: var(--muted); text-align: right; line-height: 1.45; }
+.weekline { margin-top: .55rem; font-size: .74rem; color: var(--muted); text-align: center; min-height: 1.1em; }
 .stats-wrap { padding-top: 1rem; }
 .stats { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .stat { flex: 1; padding: .7rem .2rem; text-align: center; }
@@ -1359,11 +1418,35 @@ def _page(title, nav_active, body, countdown=0, wide=False):
 </div>
 <script>
 (function(){{
-  var secs={countdown}, el=document.getElementById('countdown');
-  if(!el||secs<=0) return;
+  var secs={countdown}, busy=false, started=Date.now();
+  var txt={json.dumps(_t('in {n}s'))};
+  if(secs<=0) return;
+  function setCountdown(){{ var el=document.getElementById('countdown'); if(el) el.textContent=txt.replace('{{n}}', Math.max(secs,0)); }}
+  // Fetch the page again and update only the parts that changed. Elements stay in place, so the
+  // charging animation keeps running and opened details stay open. Anything unexpected → reload.
+  function refresh(){{
+    if(busy) return; busy=true;
+    fetch(location.href,{{cache:'no-store'}}).then(function(r){{ return r.text(); }}).then(function(t){{
+      var d=new DOMParser().parseFromString(t,'text/html');
+      var fresh=d.querySelectorAll('[data-u]'), cur=document.querySelectorAll('[data-u]');
+      if(fresh.length!==cur.length) {{ location.reload(); return; }}
+      for(var i=0;i<fresh.length;i++){{
+        var n=fresh[i], o=document.querySelector('[data-u="'+n.getAttribute('data-u')+'"]');
+        if(!o) {{ location.reload(); return; }}
+        if(o.className!==n.className) o.className=n.className;
+        var st=n.getAttribute('style');
+        if(o.getAttribute('style')!==st) {{ if(st===null) o.removeAttribute('style'); else o.setAttribute('style',st); }}
+        if(o.innerHTML!==n.innerHTML) o.innerHTML=n.innerHTML;
+      }}
+      var m=t.match(/var secs=(\\d+)/); secs=m?parseInt(m[1],10):60; busy=false;
+    }}).catch(function(){{ secs=30; busy=false; }});
+  }}
   (function tick(){{
-    if(secs<=0){{ location.reload(); return; }}
-    el.textContent={json.dumps(_t('in {n}s'))}.replace('{{n}}', secs); secs--;
+    if(secs<=0) {{
+      if(Date.now()-started>1800000) {{ location.reload(); return; }}   // full reload every 30 min
+      if(!document.hidden) refresh(); else secs=15;
+    }}
+    setCountdown(); if(secs>0) secs--;
     setTimeout(tick,1000);
   }})();
 }})();
@@ -1395,6 +1478,9 @@ def build_status_page():
     ts_str    = time.strftime('%d.%m.%Y %H:%M:%S', time.localtime(ts)) if ts else '–'
 
     error_box = f'<div class="error-box">⚠️ {_esc(error)}</div>' if error else ''
+    evcc_url = str(_get('EVCC_URL', '')).rstrip('/')
+    live     = _evcc_live(evcc_url) if evcc_url and vehicles else {}
+    sessions = _evcc_sessions(evcc_url) if evcc_url and vehicles else []
 
     # Build next poll / retry display
     poll_text = (_t("in {n}s (attempt {count})", n=next_poll, count=error_count)
@@ -1514,7 +1600,16 @@ def build_status_page():
                         else time.strftime('%d.%m. %H:%M', time.localtime(last_contact)) if last_contact else '–')
             shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
             is_charging = state == 'Charging'
-            power_sub = (f'⚡ {_dec(power_w / 1000)} kW' if state == 'Charging' and power_w > 100 else '')
+            ename  = cfg.get(f'evcc_vehicle_{vin}')
+            solar  = (live.get('solar') or {}).get(ename)
+            eta    = (_eta_text(soc, (live.get('limit') or {}).get(ename) or (limit_soc if limit_soc < 100 else None),
+                                veh.get('capacity') or 60, power_w) if is_charging else '')
+            title  = (live.get('titles') or {}).get(ename)
+            week   = _week_stats(sessions, title) if title else None
+            power_sub = ((f'⚡ {_dec(power_w / 1000)} kW' + (f' · ☀ {int(solar)} %' if solar is not None else '')
+                          + (f'<br><span style="color:var(--faint)">{eta}</span>' if eta else ''))
+                         if is_charging and power_w > 100 else '')
+            week_html = (f'{_t("This week")} {_dec(week[0])} kWh · ☀ {int(week[1])} %' if week else '')
             odo_str = f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")
 
             veh_cols.append(f"""
@@ -1526,14 +1621,14 @@ def build_status_page():
                 <div class="vname">{_esc(shown_name)}</div>
                 <div class="vvin">{_esc(vin)}</div>
               </div>
-              <div class="chips">
+              <div class="chips" data-u="{_esc(vin)}:chips">
                 <span class="chip{' pulse' if is_charging else ''}" style="color:{state_color};border-color:{state_color}55">{icon} {state_label}</span>
                 {bat_badge}
               </div>
             </div>
           </div>
           <div class="vi">
-            <div class="soc-row">
+            <div class="soc-row" data-u="{_esc(vin)}:soc">
               <span class="soc-num" style="color:{bar_color}">{soc}</span><span class="unit">%</span>
               <span class="soc-sub">{power_sub}</span>
             </div>
@@ -1541,11 +1636,11 @@ def build_status_page():
           <div class="vi">
             <div class="bar-wrap">
               {zone_html}
-              <div class="bar-fill{' charging' if is_charging else ''}" style="width:{soc}%;--c:{bar_color};background-color:{bar_color};position:relative;z-index:1"></div>
+              <div class="bar-fill{' charging' if is_charging else ''}" data-u="{_esc(vin)}:fill" style="width:{soc}%;--c:{bar_color};background-color:{bar_color};position:relative;z-index:1"></div>
               {limit_html}
               {opt_html}
             </div>
-            <div class="bar-labels">
+            <div class="bar-labels" data-u="{_esc(vin)}:labels">
               <span>0%</span>
               {lim_label}
               {opt_label}
@@ -1553,16 +1648,17 @@ def build_status_page():
             </div>
           </div>
           <div class="vi stats-wrap">
-            <div class="stats">
+            <div class="stats" data-u="{_esc(vin)}:stats">
               <div class="stat"><div class="label">{_t('Range')}</div><div class="v">{int(range_km)} km</div></div>
               <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
               <div class="stat"><div class="label">{_t('Last contact')}</div><div class="v">{lc_short}</div></div>
             </div>
+            <div class="weekline" data-u="{_esc(vin)}:week">{week_html}</div>
           </div>
-          <div class="vi"><div class="notes">{warnings}</div></div>
+          <div class="vi"><div class="notes" data-u="{_esc(vin)}:notes">{warnings}</div></div>
           <div class="vi">
             <div class="label" style="margin:.9rem 0 .4rem">{_t('SoC History – 7 days')}</div>
-            {chart}
+            <div data-u="{_esc(vin)}:chart">{chart}</div>
             <div style="display:flex;gap:1rem;margin-top:.4rem;font-size:.68rem;color:var(--faint)">
               <span style="color:#22c55e">━</span> {_t('Optimal zone')}
               <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
@@ -1590,12 +1686,14 @@ def build_status_page():
     # System status: one quiet line, details collapsed
     main_cards += f"""
         <details class="vdetails" style="max-width:520px;margin:1.2rem auto 0;border-top:1px solid var(--line)">
-          <summary><span class="dot green"></span>{_t('Bridge')} {_t('Online')} · {_t('Data age')} {age}s</summary>
+          <summary data-u="sys"><span class="dot green"></span>{_t('Bridge')} {_t('Online')} · {_t('Data age')} {age}s</summary>
+          <div data-u="sysrows">
           <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_esc(_get('VRM_SITE_ID','–'))}</span></div>
           <div class="meta-row"><span>{_t('Last update')}</span><span class="meta-val">{ts_str}</span></div>
           <div class="meta-row"><span>{_t('Data age')}</span><span class="meta-val">{age}s</span></div>
           <div class="meta-row"><span>{_t('Next poll')}</span>{next_poll_display}</div>
           <div class="meta-row"><span>{_t('Uptime')}</span><span class="meta-val">{up_str}</span></div>
+          </div>
         </details>"""
 
     body = error_box + main_cards
