@@ -106,9 +106,8 @@ Vehicle matching uses range, then SoC if necessary; ambiguous matches are skippe
 To change the limit on any installation, the proxy needs the **vehicle name in evcc** (call `POST /api/vehicles/<name>/limitsoc/…`). It finds it on its own:
 
 1. **evcc address:** `EVCC_URL` (in `.env` or on the settings page).
-2. **Mapping VIN → evcc vehicle**, in two ways:
-   - **Immediately via the evcc database:** mount evcc's data directory read-only (`./evcc-data:/evcc:ro`). The proxy reads the vehicles including `vin:` from it. evcc does not show the VIN in its API without an admin login, but the database has it. The evcc vehicle must have `vin:` set.
-   - **By learning, without the database:** as soon as evcc shows a car on a loadpoint, the proxy matches it to the VRM car by range and state of charge and remembers it. Ambiguous matches, such as two cars at nearly the same charge, are skipped. The database helps then.
+2. **Mapping VIN → evcc vehicle:**
+   - **By learning:** as soon as evcc shows a car on a loadpoint, the proxy matches it to the VRM car by range and state of charge and remembers it. Ambiguous matches, such as two cars at nearly the same charge, are skipped. Manual selection (point 4) helps then.
 3. **Loadpoint:** the proxy reads its limit from evcc's state and also resets it when restoring.
 
 4. **By hand, when detection is not enough:** the settings have a **Vehicles** section with one row per VIN: picture/model, **vehicle in EVCC** (the list comes from a scan of evcc), **battery type** and **battery capacity**. Whatever stays on "Automatic" is detected. Below it, **Controlled loadpoints** selects from the scan which wallboxes the proxy may change limits on and re-trigger vehicle detection for. The default is all of them.
@@ -157,7 +156,7 @@ vehicles:
 
 For `tesla-ble`, **leave the port out of `url`**: the template appends the separate `port`. This interface supplies data; vehicle commands are acknowledged as no-ops.
 
-In the proxy's settings, enter `EVCC_URL` as `http://evcc.example:7070`, choose appropriate thresholds, and set the daily vehicle limit in evcc. For immediate VIN mapping of vehicles stored in evcc's database, merge this optional fragment into the existing Compose service (or a Compose override):
+In the proxy's settings, enter `EVCC_URL` as `http://evcc.example:7070`, choose appropriate thresholds, and set the daily vehicle limit in evcc. Alternatively these values can be written into the Compose service (or a Compose override):
 
 ```yaml
 services:
@@ -168,10 +167,7 @@ services:
       FULL_CHARGE_KWH: "190"
     volumes:
       - config:/config
-      - ./example-evcc-data:/evcc:ro
 ```
-
-Replace the host directory with evcc's actual data directory containing `evcc.db` (the container's `/root/.evcc`); keep the mount read-only. The proxy reads database vehicle configs with VINs. Without that mount, it learns a mapping when evcc shows a uniquely matched car on a loadpoint during full-charge evaluation.
 
 For a source update, update the checkout and run `docker compose up -d --build`. For a published-image update, run `docker compose pull`, then `docker compose up -d --no-build`.
 
@@ -196,7 +192,6 @@ Nonempty values saved in `/config/settings.json` take precedence over environmen
 | `FULL_CHARGE_KWH` | `0` (off); 0–2000 charged kWh. Either enabled threshold makes a vehicle due. |
 | `FULL_CHARGE_BASE_LOAD` | `1500` W; subtracted from the solar forecast, configurable 0–20000 W. |
 | `EVCC_URL` | Empty: evcc integration off. Example: `http://evcc.example:7070`. |
-| `EVCC_DB` | `/evcc/evcc.db`; optional read-only database for VIN mapping. |
 | `LANGUAGE` | `auto` (browser preference), `en` or `de`; UI only. |
 
 Only the VRM credentials, polling interval, port and timezone are passed by the supplied Compose file. Add other variables under `environment` or use the settings page. Unknown capacity falls back to 60 kWh for full-charge planning and the status ETA, so supply an accurate capacity. The API's time estimate needs a known capacity.
@@ -234,7 +229,7 @@ The UI warns after `max(180 s, 3 × POLL_INTERVAL)` without a successful VRM fet
 - **Wrong dates/times:** set `TZ` to the required timezone in Compose and recreate the container.
 - **evcc connection errors:** use `url: http://proxy.example` and `port: 8080`, not a URL with the port repeated.
 - **Wrong vehicle:** match the VIN shown by the proxy. Matching is case-insensitive; unknown VINs fall back to the first vehicle. The warning is logged once per unknown VIN when multiple vehicles exist. Detection requests skip ambiguous matches.
-- **No evcc statistics or automation:** If `EVCC_URL` is set but wrong (unreachable, wrong port or path, login required, not an evcc answer), the status page shows a red error with the reason at the top. Also check: check `EVCC_URL`, reachability, VIN mapping and the read-only database path. The client sends no evcc login credentials; an API requiring authentication fails. Look for `[EVCC]`, `[LIVE]` or `[FULL]` errors in the log.
+- **No evcc statistics or automation:** If `EVCC_URL` is set but wrong (unreachable, wrong port or path, login required, not an evcc answer), the status page shows a red error with the reason at the top. Also check: check `EVCC_URL`, reachability, VIN mapping (settings → Vehicles → Vehicle in EVCC). The client sends no evcc login credentials; an API requiring authentication fails. Look for `[EVCC]`, `[LIVE]` or `[FULL]` errors in the log.
 - **Full charge stays due:** check that the mapped vehicle is connected and evcc supplies a sufficient solar forecast. Winter can mean a long wait; the details show “due”. Verify that the car itself allows 100 % and evcc uses PV surplus charging.
 - **Limit not restored:** allow the 30-minute hold after charging stops, check evcc API errors, and keep `EVCC_URL` configured. Only a saved daily vehicle limit of 1–99 % can be restored.
 
@@ -246,7 +241,7 @@ Developed and tested on **one** installation: a Victron EV Charging Station, two
 
 - **Other brands in VRM.** The proxy reads VRM's "Electric Vehicle" device (`/Soc`, range, `/ChargingState`, optionally `/VIN`, `/BatteryCapacity`). If VRM supplies different or fewer fields for a brand, values or the mapping are missing. Without a VIN the proxy uses a substitute id; mapping through the evcc database then does not work, learning by range and state of charge still does.
 - **Other wallboxes.** The station logic (`/Mgmt/Connection`, status, session energy) applies to Victron stations only. For other wallboxes, charging power and target come from evcc and the vehicle status.
-- **Vehicles from `evcc.yaml`.** The VIN mapping through the database only sees vehicles created in the UI. For file-based vehicles, learning helps (it requires the evcc vehicle to take its range and state of charge **from the proxy**, template `tesla-ble`), or choose the vehicle **by hand** per car in the settings.
+- **Vehicles from `evcc.yaml`.** For file-based vehicles, learning helps (it requires the evcc vehicle to take its range and state of charge **from the proxy**, template `tesla-ble`), or choose the vehicle **by hand** per car in the settings.
 - **Other evcc versions.** Needed: `/api/state` with loadpoints, vehicle limit, the solar-forecast time series and the write calls under `/api/vehicles/<name>/limitsoc/…`. No minimum version has been determined.
 - **Identical vehicle titles.** evcc sessions are matched by title; two cars with the same title mix their kWh.
 - **Battery capacity.** Order: the car's capacity in the settings, else the global `CAPACITY`, else the VRM value, else the evcc vehicle's capacity, finally 60 kWh. Enter it per car when sizes differ. The same applies to the battery type (LFP/NMC).
