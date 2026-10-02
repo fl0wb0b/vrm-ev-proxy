@@ -2,7 +2,9 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Verbindet Fahrzeugdaten aus Victron VRM mit evcc und automatisiert regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+Bringt den Fahrzeugstatus aus Victron VRM in evcc – für jede Automarke, die VRM anbindet – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+
+**Universell:** Ursprünglich entstand der Proxy, um den Fahrzeugstatus (Ladestand, Reichweite, Ladezustand) aus VRM nach evcc zu bekommen. Die Anbindung der einzelnen Hersteller übernimmt VRM. Der Proxy reicht deren Daten im Tesla-Format an evcc weiter und ist deshalb nicht auf eine Marke festgelegt. Die Vollladungs-Automatik ist eine Zusatzfunktion darauf.
 
 ## Warum es dieses Projekt gibt
 
@@ -38,7 +40,7 @@ Alle Screenshots verwenden **erfundene Demodaten**: VINs mit `VF1DEMO…`, Site-
 
 - **Regelmäßige Vollladungen ohne Kalender:** Tage **oder** geladene kWh machen ein Fahrzeug fällig; ein viel gefahrenes Auto kann dadurch früher an die Reihe kommen.
 - **Fahrzeugerkennung nach schnellem Wechsel:** Tauscht man zwei Autos zwischen evcc-Abfragen, kann das alte am Ladepunkt stehen bleiben. Erkennt der Proxy die falsche Zuordnung während des Ladens, fordert er eine neue Erkennung an.
-- **Tesla-Fahrzeugdaten-API für evcc:** Das Template `tesla-ble` nutzt die VRM-Daten, ohne dass dieser Proxy eine zweite Verbindung zum Fahrzeug aufbaut.
+- **Fahrzeugstatus aus VRM in evcc, markenunabhängig:** VRM bindet die Hersteller an; der Proxy stellt deren Daten im Tesla-Format bereit, sodass evcc sie über das Template `tesla-ble` abruft. Es entsteht keine zweite Verbindung zum Fahrzeug.
 - **Status für Handy oder Wandtablet:** Normale Aktualisierungen ersetzen nur geänderte Seitenbereiche; Details bleiben offen und die Ladeanimation läuft weiter. Nach 30 Minuten oder einer unerwarteten Strukturänderung wird vollständig neu geladen.
 - **Antworten beim Laden:** „Ladeziel 80 % · ca. HH:MM“ und der Solaranteil der Sitzung zeigen, wann das Laden voraussichtlich fertig ist und wie viel davon aus Sonne stammt. Die Endzeit ist aus der aktuellen Leistung geschätzt. Die Wochenzeile mit kWh/Solar stammt aus evcc-Ladesitzungen.
 - **Ehrliche Aktualität:** „VRM-Abruf vor X s“ oder „Daten veraltet“ bezieht sich auf den VRM-Abruf. Der separat angezeigte letzte Fahrzeugkontakt kann älter sein. Ein erfolgreicher VRM-Abruf bedeutet keinen gerade erfolgten Kontakt zum Auto.
@@ -50,7 +52,7 @@ Alle Screenshots verwenden **erfundene Demodaten**: VINs mit `VF1DEMO…`, Site-
 2. **Nach Zeit oder Energie fällig werden.** `FULL_CHARGE_DAYS` zählt Kalendertage seit der letzten Vollladung; `FULL_CHARGE_KWH` zählt seitdem geladene Energie. Eine erreichte Schwelle genügt. Die Energie stammt aus evcc-Sitzungen plus beobachteten SoC-Anstiegen × Kapazität, während das Auto außerhalb der Anlage Laden meldet. So zählt neben der Zeit auch die Nutzung. Ohne erfasste Vollladung dient die erste Prüfung als Zeitreferenz.
 3. **Einen passenden Sonnentag abwarten.** Höchstens alle fünf Minuten prüft der Proxy die evcc-Prognose und einen verbundenen Ladepunkt mit dem zugeordneten Fahrzeug. Er zieht die Hausgrundlast ab (Standard 1500 W), begrenzt den Überschuss auf die Ladepunktleistung und vertraut 80 % des Rests. Die fehlende Akkuenergie wird mit 90 % Ladeeffizienz berechnet. Die Restprognose muss sie decken; außerdem muss der **aktuelle Prognose-Zeitschritt** über der Grundlast liegen. Diese Tageslichtprüfung misst weder Sonnenschein noch tatsächliche PV-Leistung.
 4. **Nur das evcc-Fahrzeuglimit anheben.** Der Proxy merkt sich das bisherige Limit und setzt es auf 100 %. Er erstellt keinen Plan und verändert weder Lademodus noch Tarifeinstellung oder Strom. **evcc muss für Überschussladen im Modus `pv` eingerichtet sein**, ohne Pläne oder Smart-Cost-Einstellungen, die Netzladen erlauben; die Energiequelle bestimmt weiterhin evcc. Das Limit im Auto muss 100 % bereits erlauben.
-5. **Das Auto fertig balancieren lassen.** Tesla kann 100 % melden, bevor das Nachladen abgeschlossen ist. Der Proxy wartet, bis VRM 100 % und **30 Minuten** lang kein Laden des Fahrzeugs meldet; eine Lademeldung setzt den Timer zurück. Dann stellt er den gespeicherten Wert am evcc-Fahrzeug **und**, falls noch verbunden, am Ladepunkt wieder her. Beide Schreibzugriffe sind nötig: evcc reicht ein gesenktes Fahrzeuglimit sonst nicht an einen bereits verbundenen Ladepunkt weiter.
+5. **Das Auto fertig balancieren lassen.** Manche Autos melden 100 %, bevor das Nachladen abgeschlossen ist (zum Beispiel Tesla). Der Proxy wartet, bis VRM 100 % und **30 Minuten** lang kein Laden des Fahrzeugs meldet; eine Lademeldung setzt den Timer zurück. Dann stellt er den gespeicherten Wert am evcc-Fahrzeug **und**, falls noch verbunden, am Ladepunkt wieder her. Beide Schreibzugriffe sind nötig: evcc reicht ein gesenktes Fahrzeuglimit sonst nicht an einen bereits verbundenen Ladepunkt weiter.
 6. **Den Versuch passend beenden.** Das gespeicherte Limit kommt auch zurück, wenn die Funktion deaktiviert wird, ein neuer Tag beginnt oder unter 100 % weniger als 0,5 kWh prognostizierter Restüberschuss für heute übrig ist. Wurden während des Versuchs 100 % erfasst, beenden auch Abstecken oder Fahren den Versuch. **Abstecken vor 100 % bricht ihn nicht sofort ab; eine vorbeiziehende Wolke ebenfalls nicht.** Eine unvollständige Vollladung bleibt fällig und kann an einem passenden Sonnentag erneut versucht werden.
 
 Implementiert in [`poll_vrm` und `_full_charge_pv`](app.py). Gespeichert wird ein evcc-Fahrzeuglimit von **1–99 %**, kein separates vorheriges Ladepunktlimit. Vor dem Aktivieren ein Alltagslimit wie 80 % am evcc-Fahrzeug einstellen.
@@ -123,7 +125,7 @@ TZ=Europe/Berlin
 
 `http://proxy.example:8080/settings` öffnen. Sind beide VRM-Werte leer, leitet `/` zur ersten Einrichtung dorthin weiter. Einstellungen und Verlauf bleiben im Compose-Volume unter `/config` erhalten.
 
-In evcc ein Fahrzeug hinzufügen; für jedes Auto mit dessen tatsächlicher VIN wiederholen. Die folgenden Werte sind Platzhalter:
+In evcc ein Fahrzeug hinzufügen; für jedes Auto mit dessen tatsächlicher VIN wiederholen. Das Template `tesla-ble` dient hier nur als technischer Zugang zum Proxy und ist **für jede Marke** richtig, die VRM liefert, nicht nur für Tesla. Die folgenden Werte sind Platzhalter:
 
 ```yaml
 vehicles:
