@@ -111,6 +111,8 @@ Damit der Proxy auf jeder Installation das Limit ändern kann, braucht er den **
    - **Durch Lernen, ohne Datenbank:** sobald evcc ein Auto an einem Ladepunkt zeigt, ordnet der Proxy es über Reichweite und Ladestand dem VRM-Auto zu und merkt sich das. Mehrdeutige Treffer, etwa zwei fast gleich geladene Autos, überspringt er. Dann hilft die Datenbank.
 3. **Ladepunkt:** Sein Limit liest der Proxy aus dem evcc-Zustand und setzt es bei der Rückstellung zusätzlich zurück.
 
+4. **Von Hand, wenn die Erkennung nicht reicht:** In den Einstellungen gibt es einen Abschnitt **Fahrzeuge** mit einer Zeile je VIN: Bild/Modell, **Fahrzeug in EVCC** (die Liste kommt aus einem Scan von evcc), **Akkutyp** und **Akkukapazität**. Was auf „Automatisch“ bleibt, wird erkannt. Darunter wählt **Gesteuerte Ladepunkte** aus dem Scan, an welchen Wallboxen der Proxy Limits ändern und die Fahrzeugerkennung neu anstoßen darf. Standard sind alle.
+
 Das Limit im Auto ändert der Proxy nie. Hat evcc eine Anmeldung, funktioniert die Anbindung nicht: Der Proxy sendet keine evcc-Zugangsdaten.
 
 ## Schnellstart
@@ -203,7 +205,7 @@ Zum Abschalten der Vollladeautomatik **beide Schwellen auf 0** setzen. Bei einem
 
 ## Fahrzeugbilder
 
-Die Einstellungen bieten automatische Auswahl, ein bestimmtes Modell, kein Bild oder eine **eigene HTTP(S)-Bild-URL je Fahrzeug**; die eigene URL hat Vorrang.
+Im Abschnitt **Fahrzeuge** der Einstellungen bietet jedes Auto automatische Auswahl, ein bestimmtes Modell, kein Bild oder eine **eigene HTTP(S)-Bild-URL**; die eigene URL hat Vorrang.
 
 Tesla-Renderings lädt **der Browser** aus [github.com/teslamotors/custom-wraps](https://github.com/teslamotors/custom-wraps) über GitHubs Raw-Content-Host. Sie werden **nicht in diesem Repository gespeichert**. Die automatische Tesla-Auswahl nutzt Modellname/VIN und Modelljahr; weitere Tesla-Varianten sind manuell auswählbar.
 
@@ -244,10 +246,10 @@ Entwickelt und getestet wurde auf **einer** Installation: Victron EV Charging St
 
 - **Andere Marken in VRM.** Der Proxy liest das VRM-Gerät „Electric Vehicle“ (`/Soc`, Reichweite, `/ChargingState`, optional `/VIN`, `/BatteryCapacity`). Liefert VRM bei einer Marke andere oder weniger Felder, fehlen Werte oder die Zuordnung. Ohne VIN nutzt der Proxy eine Ersatzkennung; die Zuordnung über die evcc-Datenbank geht dann nicht, das Lernen über Reichweite und Ladestand schon.
 - **Andere Wallboxen.** Die Stationslogik (`/Mgmt/Connection`, Status, Sitzungsenergie) gilt nur für Victron-Ladestationen. Für andere Wallboxen kommen Ladeleistung und Ladeziel aus evcc und dem Fahrzeugstatus.
-- **Fahrzeuge aus der `evcc.yaml`.** Die VIN-Zuordnung über die Datenbank sieht nur in der Oberfläche angelegte Fahrzeuge. Bei Fahrzeugen aus der Datei bleibt das Lernen, und das setzt voraus, dass das evcc-Fahrzeug seine Reichweite und seinen Ladestand **vom Proxy** bezieht (Template `tesla-ble`).
+- **Fahrzeuge aus der `evcc.yaml`.** Die VIN-Zuordnung über die Datenbank sieht nur in der Oberfläche angelegte Fahrzeuge. Bei Fahrzeugen aus der Datei hilft das Lernen (setzt voraus, dass das evcc-Fahrzeug Reichweite und Ladestand **vom Proxy** bezieht, Template `tesla-ble`) oder die **Handauswahl** je Auto in den Einstellungen.
 - **Andere evcc-Versionen.** Gebraucht werden `/api/state` mit Ladepunkten, Fahrzeug-Limit, Solarprognose-Zeitreihe und die Schreibaufrufe unter `/api/vehicles/<name>/limitsoc/…`. Eine Mindestversion ist nicht bestimmt.
 - **Gleiche Fahrzeugtitel.** evcc-Sitzungen werden über den Titel zugeordnet; zwei Autos mit gleichem Titel vermischen ihre kWh.
-- **Akkukapazität.** Reihenfolge: Einstellung `CAPACITY` (gilt für **alle** Autos), sonst der VRM-Wert, sonst die Kapazität des evcc-Fahrzeugs, zuletzt 60 kWh. Bei mehreren verschieden großen Autos `CAPACITY` leer lassen.
+- **Akkukapazität.** Reihenfolge: Kapazität des Autos in den Einstellungen, sonst die globale `CAPACITY`, sonst der VRM-Wert, sonst die Kapazität des evcc-Fahrzeugs, zuletzt 60 kWh. Bei verschieden großen Autos je Auto eintragen. Dasselbe gilt für den Akkutyp (LFP/NMC).
 
 Passt etwas davon nicht, bleibt die Vollladung auf „Zuordnung fehlt“ und ist evcc falsch eingetragen, zeigt die Statusseite einen Fehler – der Proxy greift nicht blind in evcc ein.
 

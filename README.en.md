@@ -111,6 +111,8 @@ To change the limit on any installation, the proxy needs the **vehicle name in e
    - **By learning, without the database:** as soon as evcc shows a car on a loadpoint, the proxy matches it to the VRM car by range and state of charge and remembers it. Ambiguous matches, such as two cars at nearly the same charge, are skipped. The database helps then.
 3. **Loadpoint:** the proxy reads its limit from evcc's state and also resets it when restoring.
 
+4. **By hand, when detection is not enough:** the settings have a **Vehicles** section with one row per VIN: picture/model, **vehicle in EVCC** (the list comes from a scan of evcc), **battery type** and **battery capacity**. Whatever stays on "Automatic" is detected. Below it, **Controlled loadpoints** selects from the scan which wallboxes the proxy may change limits on and re-trigger vehicle detection for. The default is all of them.
+
 The proxy never changes the limit inside the car. If evcc requires a login, the connection does not work: the proxy sends no evcc credentials.
 
 ## Quick start
@@ -203,7 +205,7 @@ To disable full-charge automation, set **both thresholds to 0**. During an activ
 
 ## Vehicle pictures
 
-Settings offers automatic selection, a specific model, no picture, or an **own HTTP(S) image URL per vehicle**; an own URL takes precedence.
+In the **Vehicles** section of the settings each car offers automatic selection, a specific model, no picture, or an **own HTTP(S) image URL**; an own URL takes precedence.
 
 Tesla renderings are loaded **by the browser** from [github.com/teslamotors/custom-wraps](https://github.com/teslamotors/custom-wraps) via GitHub's raw-content host. They are **not stored in this repository**. Automatic Tesla selection uses model name/VIN and model year; other Tesla variants can be chosen manually.
 
@@ -244,10 +246,10 @@ Developed and tested on **one** installation: a Victron EV Charging Station, two
 
 - **Other brands in VRM.** The proxy reads VRM's "Electric Vehicle" device (`/Soc`, range, `/ChargingState`, optionally `/VIN`, `/BatteryCapacity`). If VRM supplies different or fewer fields for a brand, values or the mapping are missing. Without a VIN the proxy uses a substitute id; mapping through the evcc database then does not work, learning by range and state of charge still does.
 - **Other wallboxes.** The station logic (`/Mgmt/Connection`, status, session energy) applies to Victron stations only. For other wallboxes, charging power and target come from evcc and the vehicle status.
-- **Vehicles from `evcc.yaml`.** The VIN mapping through the database only sees vehicles created in the UI. For file-based vehicles only learning remains, and that requires the evcc vehicle to take its range and state of charge **from the proxy** (template `tesla-ble`).
+- **Vehicles from `evcc.yaml`.** The VIN mapping through the database only sees vehicles created in the UI. For file-based vehicles, learning helps (it requires the evcc vehicle to take its range and state of charge **from the proxy**, template `tesla-ble`), or choose the vehicle **by hand** per car in the settings.
 - **Other evcc versions.** Needed: `/api/state` with loadpoints, vehicle limit, the solar-forecast time series and the write calls under `/api/vehicles/<name>/limitsoc/…`. No minimum version has been determined.
 - **Identical vehicle titles.** evcc sessions are matched by title; two cars with the same title mix their kWh.
-- **Battery capacity.** Order: the `CAPACITY` setting (applies to **all** cars), else the VRM value, else the evcc vehicle's capacity, finally 60 kWh. With several cars of different size leave `CAPACITY` empty.
+- **Battery capacity.** Order: the car's capacity in the settings, else the global `CAPACITY`, else the VRM value, else the evcc vehicle's capacity, finally 60 kWh. Enter it per car when sizes differ. The same applies to the battery type (LFP/NMC).
 
 If any of this does not fit, the full charge stays at "mapping missing", and if evcc is entered wrongly the status page shows an error – the proxy does not blindly act on evcc.
 
