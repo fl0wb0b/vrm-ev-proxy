@@ -1,159 +1,243 @@
 # vrm-ev-proxy
 
-Connects your EV from **Victron VRM** to your local **EVCC** instance.
+[English](README.md) · [Deutsch](README.de.md)
 
-VRM integrates with the EV manufacturer's API and makes vehicle data available in the VRM Cloud. This proxy fetches that data periodically (default: 60s, configurable) and serves it locally to EVCC – with a built-in status page and settings UI.
+Connects vehicle data from Victron VRM to evcc and automates periodic full charges for LFP batteries when the solar forecast allows it.
 
+## Why this exists
+
+“When did I last charge to 100 %?” should not be another thing to remember.
+
+This was built by an owner of LFP electric cars using Victron VRM and evcc. LFP batteries need periodic full charges for BMS cell balancing and SoC calibration: their flat voltage curve makes the BMS depend on counting energy, and that estimate drifts. The code's UI hint gives a rough estimate of **3–5 % in 3–4 weeks or 100–150 kWh**; this is not a measurement of your battery. Everyday charging usually stops around 80 % to reduce time at high SoC.
+
+Doing this manually means remembering the last full charge, finding a sunny day, raising the evcc limit to 100 %, and remembering to put it back. The proxy handles that sequence: record 100 % per vehicle, decide when another full charge is due, wait for a suitable solar forecast, temporarily raise the evcc limit, and restore the daily value after charging finishes.
+
+The goal is **zero-touch after setup**: plug in as usual; evcc handles surplus charging, and the proxy handles when to allow a full charge. The operator uses **14 days or 190 kWh for a 60 kWh LFP battery**. These are adjustable choices, not defaults or a universal battery recommendation. Enough sunshine and the right evcc setup remain prerequisites.
+
+## Screenshots
+
+All screenshots use **invented demo data**: `VF1DEMO…` VINs, site ID `123456`, and a demo token. They show the German UI; English is also available.
+
+![Desktop status with two demo vehicles, charging target, estimated finish time and solar share](docs/screenshots/status-desktop.png)
+
+*Desktop: one vehicle charging, one disconnected; SoC, range, target, estimated finish time and solar share are visible at a glance.*
+
+![Expanded demo vehicle details showing odometer, vehicle contact, weekly energy and history section](docs/screenshots/status-details.png)
+
+*Expanded details: odometer, last vehicle contact, the seven-day kWh/solar row and the start of the SoC history section.*
+
+<img src="docs/screenshots/status-mobile.png" alt="Mobile status with stacked demo vehicle cards and charging information" width="360">
+
+*Mobile: stacked cards keep the charging target and solar share readable on a phone.*
+
+<img src="docs/screenshots/settings.png" alt="Settings with demo VRM credentials, battery profile, evcc URL, full-charge thresholds and picture choices" width="440">
+
+*Settings: VRM connection, battery profile, polling, evcc integration, full-charge thresholds and vehicle pictures.*
+
+## Features
+
+- **Periodic full charges without a calendar:** days **or** charged kWh make a vehicle due, so a frequently driven car can qualify earlier.
+- **Vehicle detection after a quick swap:** swapping two cars between evcc polls can leave the old vehicle on the loadpoint. The proxy requests detection again while charging when it can identify the mismatch.
+- **Tesla-style vehicle-data API for evcc:** reuse VRM's vehicle data through the `tesla-ble` template, without a second vehicle connection from this proxy.
+- **Status for a phone or wall tablet:** normal refreshes update changed page sections, preserving open details and continuing charging animations. A full reload happens after 30 minutes or an unexpected page structure change.
+- **Answers while charging:** “Target 80 % · approx. HH:MM” (`Ladeziel 80 % · ca. HH:MM` in German) and the session's solar share answer when charging should finish and how solar-powered it is. ETA uses current power and is an estimate. The seven-day kWh/solar row comes from evcc sessions.
+- **Honest freshness:** “VRM poll X s ago” or “Data is stale” describes the VRM fetch. The separate last vehicle contact can be older. A successful VRM fetch does not mean the car was just contacted.
+- **Battery context and pictures:** LFP/NMC profiles, a daily SoC band, a warning above it, hourly history, estimated charge cycles and time above the configured maximum. The flowing charging bar resembles the car display; pictures help distinguish vehicles.
+
+## How the full charge works
+
+1. **Record actual reported 100 %.** The proxy stores the first observed transition to 100 % per VIN, wherever charging happened. Sitting at 100 % does not move the date forward. SoC is truncated: 99.6 % remains 99 %.
+2. **Become due by time or energy.** `FULL_CHARGE_DAYS` counts calendar days from the last full charge; `FULL_CHARGE_KWH` counts charged energy since then. Either threshold is enough. Energy comes from evcc sessions plus observed SoC gains × capacity while the car reports charging away from the site. This accounts for use as well as time. With no recorded full charge, the first evaluation provides the time reference.
+3. **Wait for a suitable solar day.** At most every five minutes, the proxy checks evcc's forecast and a connected loadpoint with the mapped vehicle. It subtracts house base load (default 1500 W), caps surplus at loadpoint power and trusts 80 % of the remainder. The missing battery energy is calculated with 90 % charging efficiency. The remaining forecast must cover it, and the **current forecast slot** must exceed base load. This daytime check does not measure sunshine or actual PV power.
+4. **Raise only the evcc vehicle limit.** The proxy remembers its previous limit and sets it to 100 %. It creates no plan and changes no charging mode, tariff setting or current. **Configure evcc for surplus charging in `pv` mode**, without plans or smart-cost settings that permit grid charging; evcc remains responsible for the energy source. The limit inside the car must already allow 100 %.
+5. **Let the car finish balancing.** Tesla can report 100 % before topping off has finished. The proxy waits until VRM reports 100 % and no vehicle charging for **30 minutes**; a charging report resets this timer. It then restores the saved value to the evcc vehicle **and**, if still connected, its loadpoint. Both writes matter: evcc otherwise does not pass a reduced vehicle limit to an already connected loadpoint.
+6. **End the attempt when appropriate.** The saved limit also returns when the feature is disabled, on a new day, or below 100 % when forecast surplus remaining today falls below 0.5 kWh. After 100 % has been recorded during the attempt, unplugging or driving also ends it. **Unplugging before 100 % does not immediately cancel it; a passing cloud does not either.** An unfinished full charge remains due and can be attempted again on a suitable sunny day.
+
+Implemented in [`poll_vrm` and `_full_charge_pv`](app.py). Restoration saves an evcc vehicle limit of **1–99 %**; it does not save a separate previous loadpoint limit. Set a daily vehicle limit such as 80 % before enabling the feature.
+
+### The three limit levels
+
+| Limit | Purpose | Proxy behavior |
+|---|---|---|
+| Inside the car | The car's own upper limit | Never changed; must allow 100 % for a full charge. |
+| Vehicle in evcc | Daily value, e.g. 80 % | Temporarily set to 100 %; the saved daily value is restored. |
+| Loadpoint in evcc | Where evcc actually stops charging | Explicitly restored to the saved **vehicle** value while that vehicle is still connected. |
+
+### Hands-off checklist
+
+Do this once; after that nobody has to ask "when did I last charge to 100 %?" again.
+
+- [ ] In the car: set the charge limit so it allows **100 %**. The proxy never touches it.
+- [ ] In evcc: set the **daily vehicle limit** (e.g. 80 %) and run the loadpoint in **`pv` mode** without plans or smart-cost grid charging.
+- [ ] In evcc: enable the solar forecast; the proxy relies on it.
+- [ ] In the proxy settings: set `FULL_CHARGE_DAYS` and `FULL_CHARGE_KWH` (either one makes a full charge due) and the evcc URL.
+- [ ] Check the status page: each car should show its last full charge and, below it, when the next one is due.
+
+### Where you see it
+
+- **Status page, vehicle card:** "Last full charge" with the date.
+- **Status page, details:** "Next full charge from PV due: …", "Full charge due – not enough PV today (forecast … kWh, needed … kWh)." or, while running, "Full charge from PV running since … – EVCC limit 100 %."
+- **Log:** the proxy logs every step, for example
+
+```text
+[FULL] <car>: last 100 % 15 days / 120 kWh ago, PV today 38.2 kWh ≥ 14.9 kWh needed – EVCC limit 80 → 100 %
+[FULL] <car>: 100 % and charging finished for 30 min – EVCC limit back to 80 %
 ```
-EV Manufacturer API
-        │
-        ▼
-  VRM Cloud API
-        ▲
-        │  polls every 60s
-  vrm-ev-proxy  ──►  EVCC
-        │
-        └──  http://<your-server>:8080
+
+## What the proxy does in evcc
+
+Requires `EVCC_URL`, e.g. `http://evcc.example:7070`. Loadpoint numbers `<n>` are one-based; `<name>` is evcc's vehicle identifier.
+
+| Action | Endpoint | When |
+|---|---|---|
+| Read state | `GET /api/state` | Detection checks during charging; full-charge evaluation; status display (20 s cache for display). |
+| Read charging sessions | `GET /api/sessions` | Weekly statistics and the kWh threshold; cached for 15 minutes. |
+| Request vehicle detection | `PATCH /api/loadpoints/<n>/vehicle` | Charging loadpoint shows a uniquely matched vehicle now disconnected here, or no vehicle with matching charging power; at most once per five minutes per loadpoint. |
+| Allow a full charge | `POST /api/vehicles/<name>/limitsoc/100` | Vehicle due, connected, and forecast checks pass. |
+| Restore vehicle limit | `POST /api/vehicles/<name>/limitsoc/<old>` | Completion or end conditions above, if a daily limit was saved. |
+| Restore loadpoint limit | `POST /api/loadpoints/<n>/limitsoc/<old>` | Same restoration, if the mapped vehicle is still connected there. |
+
+Vehicle matching uses range, then SoC if necessary; ambiguous matches are skipped. VRM may retain an old car's station connection: station data goes to the vehicle reporting activity, otherwise the most recently contacted candidate. Other candidates do not inherit those station values; their own VRM charging state is still evaluated.
+
+## Quick start
+
+Requires Docker, Docker Compose, a VRM installation exposing an Electric Vehicle device, and network access to VRM. The supplied Compose file uses **host networking**. The Dockerfile runs Python 3.12 with standard-library dependencies only.
+
+From a checkout of this repository:
+
+```sh
+cp .env.example .env
+# Edit .env: replace the example credentials, or leave both empty for browser setup.
+docker compose up -d --build
 ```
 
----
+Example `.env` (replace the invented credentials, or clear both VRM values):
 
-**Vehicle pictures:** the status page shows a picture per car. Tesla models use Tesla's own renderings from `teslamotors/custom-wraps` (loaded by the browser from GitHub, not stored here); VW ID.4, Kia EV6, Hyundai Ioniq 5 and Ford Mustang Mach-E are shipped in `images/` (768 px JPEG, served at `/img/<id>.jpg`) and picked automatically by the car's name. Settings → *Vehicle pictures* chooses one per car, or sets your own picture URL (wins over the choice).
-
-## Install
-
-**Requires:** Docker + Docker Compose · Supports `linux/amd64` and `linux/arm64` (Raspberry Pi)
-
-```bash
-git clone https://github.com/fl0wb0b/vrm-ev-proxy.git
-cd vrm-ev-proxy
-sudo docker compose up -d
+```dotenv
+VRM_TOKEN=REPLACE_WITH_VRM_API_TOKEN
+VRM_SITE_ID=123456
+POLL_INTERVAL=60
+PORT=8080
+TZ=Europe/Berlin
 ```
 
-Then open **`http://<your-server-ip>:8080`** in your browser – the setup wizard guides you through the rest. That's it.
+Open `http://proxy.example:8080/settings`. With both VRM values empty, `/` redirects there for first-run setup. Settings and history persist in the Compose volume mounted at `/config`.
 
----
-
-## Update
-
-```bash
-cd vrm-ev-proxy
-sudo docker compose pull && sudo docker compose up -d
-```
-
-Or use [Watchtower](https://containrrr.dev/watchtower/) to update automatically – no commands needed.
-
----
-
-## Configuration
-
-Everything is configured in the browser at `/settings` – no config files, no terminal.
-
-| Setting | Where to find |
-|---------|--------------|
-| **VRM Token** | VRM Portal → avatar top right → Settings → API Tokens → Generate |
-| **VRM Site ID** | The number in your VRM URL: `vrm.victronenergy.com/installation/`**`12345`**`/dashboard` |
-| **Language** | Web UI in German or English – `Auto` follows the browser language |
-
----
-
-## Web UI
-
-| URL | What you get |
-|-----|-------------|
-| `:8080/` | Live status: SoC, range, charging state, 7-day chart |
-| `:8080/settings` | All settings – change anytime without restart |
-| `:8080/api/raw` | Raw VRM values of the EV and its charging station (debugging) |
-
----
-
-## EVCC setup
-
-Add a vehicle in EVCC with these settings:
-- **Template:** Tesla BLE (`tesla-ble`)
-- **URL:** `http://<server-ip>` – **without** port, EVCC appends `:<port>` itself
-- **Port:** `8080`
-- **VIN:** your vehicle VIN
+Add a vehicle in evcc; repeat with each vehicle's actual VIN. The values below are placeholders:
 
 ```yaml
 vehicles:
-  - name: tesla
+  - name: demo_ev
     type: template
     template: tesla-ble
-    title: Tesla
-    vin: 5YJ3E1EA0KF000001
-    url: http://192.168.1.10
+    title: Demo EV
+    vin: VF1DEMO00000000001
+    url: http://proxy.example
     port: 8080
     capacity: 60
 ```
 
-The proxy serves all fields the template reads from `charge_state`: `battery_level`, `battery_range` (miles), `charge_limit_soc`, `charge_amps`, `charging_state`, `charge_energy_added` (kWh per plug-in session – from the VRM energy meter `/Ac/Energy/Forward` if available, otherwise integrated from AC/DC power) and `minutes_to_full_charge` (estimate from battery capacity – `/settings` or VRM `/BatteryCapacity`).
+For `tesla-ble`, **leave the port out of `url`**: the template appends the separate `port`. This interface supplies data; vehicle commands are acknowledged as no-ops.
 
-Known bugs and their status: [BUGS.md](BUGS.md)
-
-### Several EVs on one charging station
-
-VRM keeps the station link (`/Mgmt/Connection`) of a car that has left, so several EVs can point at the same station. Only one of them gets the station's status, power and session energy: the one that reports charging activity itself, otherwise the most recently seen one. All others are reported as `Disconnected`.
-
-EVCC only identifies the vehicle again after the charger reported "disconnected". A quick swap between two cars is missed, and EVCC keeps the previous car on the loadpoint. Set **EVCC URL** (e.g. `http://192.168.1.10:7070`) in `/settings` to fix this live, for any number of loadpoints and without mapping: while one of the proxy's EVs is charging, the proxy reads EVCC's `/api/state`. A charging loadpoint whose vehicle – recognised by its range and, between cars with a similar range, its SoC – both of which EVCC takes from this proxy – is `Disconnected` here gets `PATCH /api/loadpoints/<n>/vehicle`, and EVCC picks the right car by its status (at most once per 5 minutes per loadpoint; skipped if no or several EVs match). If your EVCC API requires a login, this fails and is logged as `[EVCC] … failed`.
-
-### Periodic full charge from PV (LFP balancing)
-
-LFP packs have a flat voltage curve, so the BMS counts charge in and out to know the SoC – and drifts. Only a full charge re-anchors it. Rough estimate: ~1–3 % after 1–2 weeks, **~3–5 % after 3–4 weeks or 100–150 kWh** without a full charge – noticeable mainly at low SoC.
-
-In `/settings` (needs **EVCC URL**):
-- **Full charge from PV after (days)** – e.g. `28`
-- **… or after charging (kWh)** – e.g. `120`: energy charged since the last 100 %, i.e. EVCC's sessions of that vehicle (`/api/sessions`) plus what the car charged away from home (Supercharger – SoC rise × capacity while the car reports charging and `AtSite` is 0)
-
-Whichever comes first makes the car due; 0 turns that part off. Any 100 % resets both – at home, on a socket or at a Supercharger. A car that sits after a full charge stays due only by days.
-
-Every 5 minutes the proxy checks EVCC's solar forecast: if the surplus left today – forecast minus **base load** (default 1500 W), capped at what the car's loadpoint can take, 80 % of it trusted – covers the energy up to 100 %, and the sun is up, the proxy sets that vehicle's EVCC limit to 100 % (`POST /api/vehicles/<name>/limitsoc/100`). All loadpoints are treated the same.
-
-EVCC never stops at a limit of 100 % – the car ends the charge itself. Tesla already shows 100 % while it is still topping off (that is when the BMS balances), so the previous limit only comes back once the car has **stopped charging and sat at 100 % for 30 minutes** – a lower limit would make EVCC cut the top-off. It also comes back when the car is unplugged or driven after reaching 100 %, when the PV day is over below 100 %, on the next day, or when the feature is turned off.
-
-Only the limit is changed: no plan, no cheap-tariff charging, so EVCC fills the car from solar surplus only (in `pv`/`smart` mode without a smart cost limit). If no day has enough sun, the status page shows the full charge as due – charge manually then.
-
-The proxy needs to know which EVCC vehicle has which VIN. EVCC's API hides the VIN without an admin login, but EVCC's database has it – mount EVCC's data directory **read-only** and the mapping is there right away:
+In the proxy's settings, enter `EVCC_URL` as `http://evcc.example:7070`, choose appropriate thresholds, and set the daily vehicle limit in evcc. For immediate VIN mapping of vehicles stored in evcc's database, merge this optional fragment into the existing Compose service (or a Compose override):
 
 ```yaml
+services:
   vrm-ev-proxy:
+    environment:
+      EVCC_URL: http://evcc.example:7070
+      FULL_CHARGE_DAYS: "14"
+      FULL_CHARGE_KWH: "190"
     volumes:
-      - ./vrm-ev-proxy/config:/config
-      - ./evcc/db:/evcc:ro          # EVCC's /root/.evcc – read-only
+      - config:/config
+      - ./example-evcc-data:/evcc:ro
 ```
 
-The default path is `/evcc/evcc.db` (setting **EVCC database**). Without the mount, a car is learned the first time EVCC shows it on a loadpoint (matched by range and SoC).
+Replace the host directory with evcc's actual data directory containing `evcc.db` (the container's `/root/.evcc`); keep the mount read-only. The proxy reads database vehicle configs with VINs. Without that mount, it learns a mapping when evcc shows a uniquely matched car on a loadpoint during full-charge evaluation.
 
-> **Note:** EVCC may send commands like `wake_up`, `charge_start`, or `set_charging_amps` to the proxy. These are accepted and acknowledged, but not forwarded to the vehicle – all data is sourced from VRM. If you need actual charge control, a separate [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) instance is required.
+For a source update, update the checkout and run `docker compose up -d --build`. For a published-image update, run `docker compose pull`, then `docker compose up -d --no-build`.
 
----
+## Configuration
 
-## Battery types
+Use `/settings` for VRM credentials, battery profile, polling, evcc integration, pictures and language. Obtain the token in the VRM portal's API-token settings; the site ID is the number in `/installation/123456/dashboard`. Leaving the token field empty keeps the existing token.
 
-Supports **LFP** and **NMC** – configurable in settings.
+Nonempty values saved in `/config/settings.json` take precedence over environment variables. Most changes take effect on the next poll or page request; **changing `PORT` requires a restart**. Clearing a setting that has an environment value falls back to that value. Settings apply globally unless explicitly per vehicle (pictures and tracking).
 
-**LFP** – optimal range 10–80%, BMS balancing reminder, reference marker in SoC bar
+| Variable | Default / meaning |
+|---|---|
+| `VRM_TOKEN` | Required VRM API token. |
+| `VRM_SITE_ID` | Required numeric installation ID. |
+| `POLL_INTERVAL` | `60` seconds; UI range 10–3600. |
+| `PORT` | `8080`; restart after changing it. |
+| `TZ` | `Europe/Berlin` in Compose; container timezone, not a UI setting. |
+| `BATTERY_TYPE` | `LFP`; alternative `NMC`. Global display/tracking profile. |
+| `CAPACITY` | Unset: use VRM `/BatteryCapacity`; global override 1–200 kWh. |
+| `OPT_MIN`, `OPT_MAX` | LFP 10–80 %, NMC 20–90 %; configurable daily display band. |
+| `FULL_REMINDER_DAYS` | `28` for LFP; UI reminder only, separate from automation. |
+| `FULL_CHARGE_DAYS` | `0` (off); 0–60 calendar days. |
+| `FULL_CHARGE_KWH` | `0` (off); 0–2000 charged kWh. Either enabled threshold makes a vehicle due. |
+| `FULL_CHARGE_BASE_LOAD` | `1500` W; subtracted from the solar forecast, configurable 0–20000 W. |
+| `EVCC_URL` | Empty: evcc integration off. Example: `http://evcc.example:7070`. |
+| `EVCC_DB` | `/evcc/evcc.db`; optional read-only database for VIN mapping. |
+| `LANGUAGE` | `auto` (browser preference), `en` or `de`; UI only. |
 
-**NMC** – optimal range 20–90%, weekly tracking of time above 80%
+Only the VRM credentials, polling interval, port and timezone are passed by the supplied Compose file. Add other variables under `environment` or use the settings page. Unknown capacity falls back to 60 kWh for full-charge planning and the status ETA, so supply an accurate capacity. The API's time estimate needs a known capacity.
 
-Both: color-coded SoC bar, 7-day history chart, charge cycle counter
+To disable full-charge automation, set **both thresholds to 0**. During an active run, keep `EVCC_URL` reachable until the saved limit has been restored. The automation is not gated by `BATTERY_TYPE`; choosing NMC alone does not disable it.
 
----
+## Vehicle pictures
+
+Settings offers automatic selection, a specific model, no picture, or an **own HTTP(S) image URL per vehicle**; an own URL takes precedence.
+
+Tesla renderings are loaded **by the browser** from [github.com/teslamotors/custom-wraps](https://github.com/teslamotors/custom-wraps) via GitHub's raw-content host. They are **not stored in this repository**. Automatic Tesla selection uses model name/VIN and model year; other Tesla variants can be chosen manually.
+
+The bundled JPEGs in [`images/`](images/) are **AI-generated studio illustrations** for VW ID.4, Kia EV6, Hyundai Ioniq 5, Ford Mustang Mach-E, Mini Countryman, Porsche Macan and Volvo EX40/XC40. Local selection uses model-name fragments. The proxy serves them at `/img/<id>.jpg`; an unavailable external image is hidden.
+
+## Endpoints
+
+| Method | Path | Result |
+|---|---|---|
+| `GET` | `/`, `/status` | Status page; redirects to settings until VRM credentials exist. |
+| `GET` / `POST` | `/settings` | Settings form / save settings. |
+| `GET` | `/api/1/vehicles/<VIN>/vehicle_data` | Tesla-style `response.response.charge_state`; HTTP 503 without data or when too old. |
+| `POST` | `/api/1/vehicles/<VIN>/command/<command>` | Acknowledged no-op, e.g. `wake_up`, `charge_start`, `set_charging_amps`. |
+| `GET` | `/api/health` | JSON status `ok`, `error` or `stale`, age, error, site ID and version; HTTP 503 for error/stale. |
+| `GET` | `/api/raw` | Cached raw VRM values per vehicle, including linked charging-station values. |
+| `GET` | `/img/<id>.jpg` | Bundled model image, if the ID is supported. |
+
+`charge_state` includes `battery_level`, `usable_battery_level`, `battery_range` (**miles**), `charge_limit_soc` (the car's VRM-reported limit), `charge_amps`, `charge_current_request`, `charging_state`, `charger_power`, `charge_energy_added` (kWh), `minutes_to_full_charge`, `time_to_full_charge` (hours) and `timestamp`. API time estimates use the car limit; the status page instead prefers evcc's effective limit for target/ETA. Session energy uses station `/Session/Energy`, then vehicle `/Ac/Energy/Forward` differences, then power integration.
+
+The UI warns after `max(180 s, 3 × POLL_INTERVAL)` without a successful VRM fetch. Vehicle data and health become stale after `max(1800 s, 10 × POLL_INTERVAL)`. Vehicle responses include `X-Data-Age-Seconds`. Docker's healthcheck tests HTTP-server liveness and accepts a 503 response; “healthy” does not guarantee fresh VRM data.
 
 ## Troubleshooting
 
-**No data showing** → check VRM Token and Site ID in `/settings`
+- **No data:** check token and site ID in `/settings`, then `docker compose logs --tail=100 vrm-ev-proxy` and `/api/health`.
+- **`No EV device found`:** the installation must expose an Electric Vehicle device in VRM; the proxy does not create one.
+- **Wrong dates/times:** set `TZ` to the required timezone in Compose and recreate the container.
+- **evcc connection errors:** use `url: http://proxy.example` and `port: 8080`, not a URL with the port repeated.
+- **Wrong vehicle:** match the VIN shown by the proxy. Matching is case-insensitive; unknown VINs fall back to the first vehicle. The warning is logged once per unknown VIN when multiple vehicles exist. Detection requests skip ambiguous matches.
+- **No evcc statistics or automation:** check `EVCC_URL`, reachability, VIN mapping and the read-only database path. The client sends no evcc login credentials; an API requiring authentication fails. Look for `[EVCC]`, `[LIVE]` or `[FULL]` errors in the log.
+- **Full charge stays due:** check that the mapped vehicle is connected and evcc supplies a sufficient solar forecast. Winter can mean a long wait; the details show “due”. Verify that the car itself allows 100 % and evcc uses PV surplus charging.
+- **Limit not restored:** allow the 30-minute hold after charging stops, check evcc API errors, and keep `EVCC_URL` configured. Only a saved daily vehicle limit of 1–99 % can be restored.
 
-**Wrong times / dates on the status page** → set the `TZ` environment variable, e.g. `TZ=Europe/Berlin` (default in docker-compose)
+Further implementation notes: [BUGS.md](BUGS.md).
 
-**`No EV device found`** → EV is not configured as a device in VRM
+## Limits
 
-**EVCC shows errors** → URL must be `http://<server-ip>` without port, port goes into the separate `port` field (otherwise EVCC calls `http://<ip>:8080:8080`)
+- **No control inside the car:** commands from evcc are no-ops. The proxy cannot wake the car, change its limit, start charging or set its current. Real vehicle control requires a separate integration.
+- **No mode, plan, tariff or current changes:** raising a limit does not itself select solar power. Existing evcc settings determine whether grid power can be used; the proxy cannot guarantee a grid-free charge.
+- **evcc is optional for VRM data, required for evcc features:** full-charge automation, detection requests, effective targets and solar/session statistics need `EVCC_URL`. UI statistics also need a learned VIN mapping.
+- **VRM data is polled, not live:** default interval 60 seconds, with backoff after errors. Vehicle contact can be older still. A 100 % report and a timer do not prove cell balancing is complete.
+- **Sun-dependent full charges can wait:** an insufficient or missing forecast keeps the vehicle due. No grid fallback is scheduled.
+- **Tracking is observational:** unobserved charging/SoC changes may be missed; away energy and cycle counts are estimates. evcc sessions are matched by vehicle title, and the seven-day row includes sessions started in that period.
+- **No HTTP authentication:** anyone able to reach the server can view status/raw data and change settings. The full VRM token is not returned in the settings form.
 
-**Wrong vehicle / multiple EVs** → the VIN in EVCC must match the VIN shown on the status page; unknown VINs fall back to the first vehicle (logged once)
+## Credits and image notice
 
----
+Uses vehicle data provided through Victron VRM and evcc's HTTP API; the Tesla-style data interface is compatible with evcc's `tesla-ble` template. Thanks to these projects and to the Tesla rendering source linked above.
+
+Product names, trademarks and manufacturer logos belong to their respective owners. This project claims no rights to manufacturer logos and implies no manufacturer affiliation or endorsement. Vehicle pictures are illustrative; AI-generated images may differ from the real models.
 
 ## License
 
-MIT
+MIT. The repository does not contain a separate `LICENSE` file yet.
