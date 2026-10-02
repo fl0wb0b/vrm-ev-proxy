@@ -2,7 +2,9 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Verbindet Fahrzeugdaten aus Victron VRM mit evcc und automatisiert regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+Bringt den Fahrzeugstatus aus Victron VRM in evcc – für jede Automarke, die VRM anbindet – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+
+**Universell:** Ursprünglich entstand der Proxy, um den Fahrzeugstatus (Ladestand, Reichweite, Ladezustand) aus VRM nach evcc zu bekommen. Die Anbindung der einzelnen Hersteller übernimmt VRM. Der Proxy reicht deren Daten im Tesla-Format an evcc weiter und ist deshalb nicht auf eine Marke festgelegt. Die Vollladungs-Automatik ist eine Zusatzfunktion darauf.
 
 ## Warum es dieses Projekt gibt
 
@@ -38,7 +40,7 @@ Alle Screenshots verwenden **erfundene Demodaten**: VINs mit `VF1DEMO…`, Site-
 
 - **Regelmäßige Vollladungen ohne Kalender:** Tage **oder** geladene kWh machen ein Fahrzeug fällig; ein viel gefahrenes Auto kann dadurch früher an die Reihe kommen.
 - **Fahrzeugerkennung nach schnellem Wechsel:** Tauscht man zwei Autos zwischen evcc-Abfragen, kann das alte am Ladepunkt stehen bleiben. Erkennt der Proxy die falsche Zuordnung während des Ladens, fordert er eine neue Erkennung an.
-- **Tesla-Fahrzeugdaten-API für evcc:** Das Template `tesla-ble` nutzt die VRM-Daten, ohne dass dieser Proxy eine zweite Verbindung zum Fahrzeug aufbaut.
+- **Fahrzeugstatus aus VRM in evcc, markenunabhängig:** VRM bindet die Hersteller an; der Proxy stellt deren Daten im Tesla-Format bereit, sodass evcc sie über das Template `tesla-ble` abruft. Es entsteht keine zweite Verbindung zum Fahrzeug.
 - **Status für Handy oder Wandtablet:** Normale Aktualisierungen ersetzen nur geänderte Seitenbereiche; Details bleiben offen und die Ladeanimation läuft weiter. Nach 30 Minuten oder einer unerwarteten Strukturänderung wird vollständig neu geladen.
 - **Antworten beim Laden:** „Ladeziel 80 % · ca. HH:MM“ und der Solaranteil der Sitzung zeigen, wann das Laden voraussichtlich fertig ist und wie viel davon aus Sonne stammt. Die Endzeit ist aus der aktuellen Leistung geschätzt. Die Wochenzeile mit kWh/Solar stammt aus evcc-Ladesitzungen.
 - **Ehrliche Aktualität:** „VRM-Abruf vor X s“ oder „Daten veraltet“ bezieht sich auf den VRM-Abruf. Der separat angezeigte letzte Fahrzeugkontakt kann älter sein. Ein erfolgreicher VRM-Abruf bedeutet keinen gerade erfolgten Kontakt zum Auto.
