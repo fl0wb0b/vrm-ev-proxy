@@ -1231,8 +1231,9 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .bar-fill { height: 100%; border-radius: 999px; transition: width .5s ease; }
 /* charging: a light band flows along the filled bar and the bar breathes (like the car's own display) */
 .bar-fill.charging {
-  background: linear-gradient(100deg, var(--c) 0%, var(--c) 35%, color-mix(in srgb, var(--c) 45%, #ffffff) 50%, var(--c) 65%, var(--c) 100%) !important;
-  background-size: 250% 100%; animation: flow 2.2s linear infinite, breathe 2.2s ease-in-out infinite;
+  background-image: linear-gradient(100deg, transparent 0%, transparent 38%, rgba(255,255,255,.55) 50%, transparent 62%, transparent 100%);
+  background-size: 250% 100%; background-repeat: no-repeat;
+  animation: flow 2.2s linear infinite, breathe 2.2s ease-in-out infinite;
 }
 @keyframes flow { from { background-position: 150% 0; } to { background-position: -100% 0; } }
 @keyframes breathe { 0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--c) 50%, transparent); }
@@ -1527,7 +1528,7 @@ def build_status_page():
           <div class="vi">
             <div class="bar-wrap">
               {zone_html}
-              <div class="bar-fill{' charging' if is_charging else ''}" style="width:{soc}%;--c:{bar_color};background:{bar_color};position:relative;z-index:1"></div>
+              <div class="bar-fill{' charging' if is_charging else ''}" style="width:{soc}%;--c:{bar_color};background-color:{bar_color};position:relative;z-index:1"></div>
               {limit_html}
               {opt_html}
             </div>
