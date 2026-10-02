@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Brings vehicle status from Victron VRM into evcc – for every car brand VRM supports – and additionally automates periodic full charges for LFP batteries when the solar forecast allows it.
+Brings vehicle status from Victron VRM into evcc – for car brands VRM supports (so far tested with Teslas only, see "Tested with") – and additionally automates periodic full charges for LFP batteries when the solar forecast allows it.
 
 **Universal:** The proxy was originally built to get the vehicle status (state of charge, range, charging state) from VRM into evcc. VRM handles the integration of the individual manufacturers; the proxy passes their data on to evcc in Tesla format and is therefore not tied to one brand. The full-charge automation is an add-on on top.
 
@@ -139,7 +139,7 @@ EVCC_URL=http://evcc.example:7070
 
 Open `http://proxy.example:8080/settings`. With both VRM values empty, `/` redirects there for first-run setup. Settings and history persist in the Compose volume mounted at `/config`.
 
-Add a vehicle in evcc; repeat with each vehicle's actual VIN. The `tesla-ble` template is only the technical way to reach the proxy and is correct for **any brand** VRM delivers, not just Tesla. The values below are placeholders:
+Add a vehicle in evcc; repeat with each vehicle's actual VIN. The `tesla-ble` template is only the technical way to reach the proxy and is not limited to Tesla; for other brands it depends on what VRM delivers (see "Tested with"). The values below are placeholders:
 
 ```yaml
 vehicles:
@@ -237,6 +237,19 @@ The UI warns after `max(180 s, 3 × POLL_INTERVAL)` without a successful VRM fet
 - **Limit not restored:** allow the 30-minute hold after charging stops, check evcc API errors, and keep `EVCC_URL` configured. Only a saved daily vehicle limit of 1–99 % can be restored.
 
 Further implementation notes: [BUGS.md](BUGS.md).
+
+## Tested with – and what is only assumed beyond that
+
+Developed and tested on **one** installation: a Victron EV Charging Station, two Teslas through VRM, evcc with vehicles created in its UI, an active solar forecast, no evcc login. That it runs there does not mean it runs everywhere. Not verified:
+
+- **Other brands in VRM.** The proxy reads VRM's "Electric Vehicle" device (`/Soc`, range, `/ChargingState`, optionally `/VIN`, `/BatteryCapacity`). If VRM supplies different or fewer fields for a brand, values or the mapping are missing. Without a VIN the proxy uses a substitute id; mapping through the evcc database then does not work, learning by range and state of charge still does.
+- **Other wallboxes.** The station logic (`/Mgmt/Connection`, status, session energy) applies to Victron stations only. For other wallboxes, charging power and target come from evcc and the vehicle status.
+- **Vehicles from `evcc.yaml`.** The VIN mapping through the database only sees vehicles created in the UI. For file-based vehicles only learning remains, and that requires the evcc vehicle to take its range and state of charge **from the proxy** (template `tesla-ble`).
+- **Other evcc versions.** Needed: `/api/state` with loadpoints, vehicle limit, the solar-forecast time series and the write calls under `/api/vehicles/<name>/limitsoc/…`. No minimum version has been determined.
+- **Identical vehicle titles.** evcc sessions are matched by title; two cars with the same title mix their kWh.
+- **Battery capacity.** Order: the `CAPACITY` setting (applies to **all** cars), else the VRM value, else the evcc vehicle's capacity, finally 60 kWh. With several cars of different size leave `CAPACITY` empty.
+
+If any of this does not fit, the full charge stays at "mapping missing", and if evcc is entered wrongly the status page shows an error – the proxy does not blindly act on evcc.
 
 ## Limits
 

@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.16.3"
+VERSION    = "2.16.4"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -310,7 +310,8 @@ def _evcc_live(url):
         data = {'problem': problem}
         print('[LIVE] ' + problem[0].format(**problem[1]), flush=True)
     else:
-        data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()}}
+        data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()},
+                'capacity': {n: _num(v.get('capacity'), 0) for n, v in (state.get('vehicles') or {}).items()}}
         for point in state.get('loadpoints') or []:
             name = point.get('vehicleName')
             if name and point.get('connected'):
@@ -472,7 +473,11 @@ def _full_charge_pv(vehicles):
                     if not point:
                         info['state'] = 'unplugged'
                         continue
-                    need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
+                    capacity = veh['capacity'] or _num(evcc_vehicles[name].get('capacity'), 0) or 60
+                    need = (100 - soc) / 100 * capacity / FULL_CHARGE_LOSSES
+                    if not _solar_forecast(state):
+                        info['state'] = 'noforecast'
+                        continue
                     surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
                     info.update(pv=surplus, need=need)
                     if surplus < need:
@@ -691,6 +696,8 @@ _DE = {
         '{url}/api/state sieht nicht nach EVCC aus – EVCC_URL prüfen (Adresse und Port, kein zusätzlicher Pfad).',
     'EVCC not reachable at {url}: {err}': 'EVCC unter {url} nicht erreichbar: {err}',
     'EVCC_URL "{url}" must start with http:// or https://.': 'EVCC_URL „{url}“ muss mit http:// oder https:// beginnen.',
+    'Full charge due – EVCC provides no solar forecast, so it cannot start. Set up a solar forecast in EVCC.':
+        'Vollladung fällig – EVCC liefert keine Solarprognose, daher kann sie nicht starten. In EVCC eine Solarprognose einrichten.',
     'Next full charge from PV due: {t}.': 'Nächste Vollladung mit PV fällig: {t}.',
     'Subtracted from the solar forecast – house consumption the car cannot use.':
         'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
@@ -823,7 +830,7 @@ def poll_vrm():
                           if r.get('Device') == 'Electric Vehicle' and r.get('dbusPath')]
 
             if not ev_records:
-                raise ValueError('No EV device found in VRM – is the Tesla configured in VRM?')
+                raise ValueError('No EV device found in VRM – is the vehicle set up in VRM?')
 
             # Group records by instance to support multiple EVs
             by_instance = {}
@@ -1087,6 +1094,8 @@ def _full_charge_text(fc):
     if st == 'pv':
         return _t('Full charge due – not enough PV today (forecast {pv} kWh, needed {need} kWh).',
                   pv=_dec(fc['pv']), need=_dec(fc['need']))
+    if st == 'noforecast':
+        return _t('Full charge due – EVCC provides no solar forecast, so it cannot start. Set up a solar forecast in EVCC.')
     if st == 'night':
         return _t('Full charge due – starts today once there is enough sun.')
     return ''
@@ -1685,7 +1694,7 @@ def build_status_page():
             is_charging = state == 'Charging'
             ename  = cfg.get(f'evcc_vehicle_{vin}')
             solar  = (live.get('solar') or {}).get(ename)
-            eta    = (_eta_text(soc, target, veh.get('capacity') or 60, power_w) if is_charging else '')
+            eta    = (_eta_text(soc, target, veh.get('capacity') or (live.get('capacity') or {}).get(ename) or 60, power_w) if is_charging else '')
             title  = (live.get('titles') or {}).get(ename)
             week   = _week_stats(sessions, title) if title else None
             charging_now = is_charging and power_w > 100

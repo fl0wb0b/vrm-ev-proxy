@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Bringt den Fahrzeugstatus aus Victron VRM in evcc – für jede Automarke, die VRM anbindet – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+Bringt den Fahrzeugstatus aus Victron VRM in evcc – für Automarken, die VRM anbindet (bisher nur mit Teslas getestet, siehe „Getestet mit“) – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
 
 **Universell:** Ursprünglich entstand der Proxy, um den Fahrzeugstatus (Ladestand, Reichweite, Ladezustand) aus VRM nach evcc zu bekommen. Die Anbindung der einzelnen Hersteller übernimmt VRM. Der Proxy reicht deren Daten im Tesla-Format an evcc weiter und ist deshalb nicht auf eine Marke festgelegt. Die Vollladungs-Automatik ist eine Zusatzfunktion darauf.
 
@@ -139,7 +139,7 @@ EVCC_URL=http://evcc.example:7070
 
 `http://proxy.example:8080/settings` öffnen. Sind beide VRM-Werte leer, leitet `/` zur ersten Einrichtung dorthin weiter. Einstellungen und Verlauf bleiben im Compose-Volume unter `/config` erhalten.
 
-In evcc ein Fahrzeug hinzufügen; für jedes Auto mit dessen tatsächlicher VIN wiederholen. Das Template `tesla-ble` dient hier nur als technischer Zugang zum Proxy und ist **für jede Marke** richtig, die VRM liefert, nicht nur für Tesla. Die folgenden Werte sind Platzhalter:
+In evcc ein Fahrzeug hinzufügen; für jedes Auto mit dessen tatsächlicher VIN wiederholen. Das Template `tesla-ble` dient hier nur als technischer Zugang zum Proxy und ist nicht auf Tesla beschränkt; bei anderen Marken hängt es davon ab, was VRM liefert (siehe „Getestet mit“). Die folgenden Werte sind Platzhalter:
 
 ```yaml
 vehicles:
@@ -237,6 +237,19 @@ Die Oberfläche warnt nach `max(180 s, 3 × POLL_INTERVAL)` ohne erfolgreichen V
 - **Limit kommt nicht zurück:** 30 Minuten nach Ladeende abwarten, evcc-API-Fehler prüfen und `EVCC_URL` eingerichtet lassen. Nur ein gespeichertes Alltagslimit von 1–99 % kann wiederhergestellt werden.
 
 Weitere Implementierungshinweise: [BUGS.md](BUGS.md).
+
+## Getestet mit – und was darüber hinaus nur angenommen ist
+
+Entwickelt und getestet wurde auf **einer** Installation: Victron EV Charging Station, zwei Teslas über VRM, evcc mit in der Oberfläche angelegten Fahrzeugen, aktiver Solarprognose, ohne evcc-Anmeldung. Dass es dort läuft, heißt nicht, dass es überall läuft. Nicht geprüft sind:
+
+- **Andere Marken in VRM.** Der Proxy liest das VRM-Gerät „Electric Vehicle“ (`/Soc`, Reichweite, `/ChargingState`, optional `/VIN`, `/BatteryCapacity`). Liefert VRM bei einer Marke andere oder weniger Felder, fehlen Werte oder die Zuordnung. Ohne VIN nutzt der Proxy eine Ersatzkennung; die Zuordnung über die evcc-Datenbank geht dann nicht, das Lernen über Reichweite und Ladestand schon.
+- **Andere Wallboxen.** Die Stationslogik (`/Mgmt/Connection`, Status, Sitzungsenergie) gilt nur für Victron-Ladestationen. Für andere Wallboxen kommen Ladeleistung und Ladeziel aus evcc und dem Fahrzeugstatus.
+- **Fahrzeuge aus der `evcc.yaml`.** Die VIN-Zuordnung über die Datenbank sieht nur in der Oberfläche angelegte Fahrzeuge. Bei Fahrzeugen aus der Datei bleibt das Lernen, und das setzt voraus, dass das evcc-Fahrzeug seine Reichweite und seinen Ladestand **vom Proxy** bezieht (Template `tesla-ble`).
+- **Andere evcc-Versionen.** Gebraucht werden `/api/state` mit Ladepunkten, Fahrzeug-Limit, Solarprognose-Zeitreihe und die Schreibaufrufe unter `/api/vehicles/<name>/limitsoc/…`. Eine Mindestversion ist nicht bestimmt.
+- **Gleiche Fahrzeugtitel.** evcc-Sitzungen werden über den Titel zugeordnet; zwei Autos mit gleichem Titel vermischen ihre kWh.
+- **Akkukapazität.** Reihenfolge: Einstellung `CAPACITY` (gilt für **alle** Autos), sonst der VRM-Wert, sonst die Kapazität des evcc-Fahrzeugs, zuletzt 60 kWh. Bei mehreren verschieden großen Autos `CAPACITY` leer lassen.
+
+Passt etwas davon nicht, bleibt die Vollladung auf „Zuordnung fehlt“ und ist evcc falsch eingetragen, zeigt die Statusseite einen Fehler – der Proxy greift nicht blind in evcc ein.
 
 ## Grenzen
 
