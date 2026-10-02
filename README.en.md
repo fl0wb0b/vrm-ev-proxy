@@ -232,7 +232,7 @@ The UI warns after `max(180 s, 3 × POLL_INTERVAL)` without a successful VRM fet
 - **Wrong dates/times:** set `TZ` to the required timezone in Compose and recreate the container.
 - **evcc connection errors:** use `url: http://proxy.example` and `port: 8080`, not a URL with the port repeated.
 - **Wrong vehicle:** match the VIN shown by the proxy. Matching is case-insensitive; unknown VINs fall back to the first vehicle. The warning is logged once per unknown VIN when multiple vehicles exist. Detection requests skip ambiguous matches.
-- **No evcc statistics or automation:** check `EVCC_URL`, reachability, VIN mapping and the read-only database path. The client sends no evcc login credentials; an API requiring authentication fails. Look for `[EVCC]`, `[LIVE]` or `[FULL]` errors in the log.
+- **No evcc statistics or automation:** If `EVCC_URL` is set but wrong (unreachable, wrong port or path, login required, not an evcc answer), the status page shows a red error with the reason at the top. Also check: check `EVCC_URL`, reachability, VIN mapping and the read-only database path. The client sends no evcc login credentials; an API requiring authentication fails. Look for `[EVCC]`, `[LIVE]` or `[FULL]` errors in the log.
 - **Full charge stays due:** check that the mapped vehicle is connected and evcc supplies a sufficient solar forecast. Winter can mean a long wait; the details show “due”. Verify that the car itself allows 100 % and evcc uses PV surplus charging.
 - **Limit not restored:** allow the 30-minute hold after charging stops, check evcc API errors, and keep `EVCC_URL` configured. Only a saved daily vehicle limit of 1–99 % can be restored.
 
