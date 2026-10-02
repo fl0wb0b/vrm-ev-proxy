@@ -2,7 +2,9 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Connects vehicle data from Victron VRM to evcc and automates periodic full charges for LFP batteries when the solar forecast allows it.
+Brings vehicle status from Victron VRM into evcc – for every car brand VRM supports – and additionally automates periodic full charges for LFP batteries when the solar forecast allows it.
+
+**Universal:** The proxy was originally built to get the vehicle status (state of charge, range, charging state) from VRM into evcc. VRM handles the integration of the individual manufacturers; the proxy passes their data on to evcc in Tesla format and is therefore not tied to one brand. The full-charge automation is an add-on on top.
 
 ## Why this exists
 
@@ -38,7 +40,7 @@ All screenshots use **invented demo data**: `VF1DEMO…` VINs, site ID `123456`,
 
 - **Periodic full charges without a calendar:** days **or** charged kWh make a vehicle due, so a frequently driven car can qualify earlier.
 - **Vehicle detection after a quick swap:** swapping two cars between evcc polls can leave the old vehicle on the loadpoint. The proxy requests detection again while charging when it can identify the mismatch.
-- **Tesla-style vehicle-data API for evcc:** reuse VRM's vehicle data through the `tesla-ble` template, without a second vehicle connection from this proxy.
+- **Vehicle status from VRM into evcc, brand-independent:** VRM integrates the manufacturers; the proxy serves their data in Tesla format so evcc fetches it through the `tesla-ble` template. No second connection to the vehicle is created.
 - **Status for a phone or wall tablet:** normal refreshes update changed page sections, preserving open details and continuing charging animations. A full reload happens after 30 minutes or an unexpected page structure change.
 - **Answers while charging:** “Target 80 % · approx. HH:MM” (`Ladeziel 80 % · ca. HH:MM` in German) and the session's solar share answer when charging should finish and how solar-powered it is. ETA uses current power and is an estimate. The seven-day kWh/solar row comes from evcc sessions.
 - **Honest freshness:** “VRM poll X s ago” or “Data is stale” describes the VRM fetch. The separate last vehicle contact can be older. A successful VRM fetch does not mean the car was just contacted.
