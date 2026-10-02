@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.18.0"
+VERSION    = "2.18.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -377,7 +377,7 @@ def _full_charge_pv(vehicles):
             last_full = cfg.get(f'last_full_charge_{vin}') or cfg.setdefault(f'full_charge_ref_{vin}', now)
             active = cfg.get(f'full_charge_{vin}')
             point = next((p for p in points if p.get('vehicleName') == name and p.get('connected')), None)
-            if point and not _lp_allowed(points.index(point) + 1):
+            if point and not active and not _lp_allowed(points.index(point) + 1):
                 infos[vin] = {'state': 'excluded'}
                 continue
             max_w = _loadpoint_max_w(point) if point else 0
@@ -1763,12 +1763,14 @@ def build_status_page():
               <div class="weekline" data-u="{_esc(vin)}:week">{week_html}</div>
               <div class="notes" data-u="{_esc(vin)}:notes2">{warnings_detail}</div>
               <div data-u="{_esc(vin)}:chart">{chart_html}</div>
+              <div data-u="{_esc(vin)}:meta">
               <div class="meta-row"><span>VIN</span><span class="meta-val">{_esc(vin)}</span></div>
               <div class="meta-row"><span>{_t('Battery profile')}</span><span class="meta-val">{bat_type} · {_t(bat['note'])}</span></div>
               <div class="meta-row"><span>{_t('Optimal range')}</span><span class="meta-val">{opt_min}% – {opt_max}%</span></div>
               <div class="meta-row"><span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span><span class="meta-val">{ta_str}</span></div>
               <div class="meta-row"><span>{_t('Charge cycles')}</span><span class="meta-val">{cycles_str}</span></div>
               <div class="meta-row"><span>{_t('Last full charge')}</span><span class="meta-val">{lf_str}</span></div>
+              </div>
             </div>
           </div>
         </div>
