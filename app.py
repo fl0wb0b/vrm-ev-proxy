@@ -1314,7 +1314,7 @@ nav a:focus-visible, .vdetails summary:focus-visible, a:focus-visible { outline:
 .vdetails summary::before { content: "▸ "; }
 .vdetails[open] summary::before { content: "▾ "; }
 .vdetails .meta-row:first-of-type { margin-top: .5rem; }
-.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin-top: .4rem; font-size: .76rem; color: var(--faint); }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: .4rem 0 .9rem; font-size: .76rem; color: var(--faint); }
 .data-status { text-align: center; font-size: .85rem; color: var(--faint); margin: -.6rem 0 1rem; }
 .data-status.stale { color: var(--warn); font-weight: 600; }
 .sysline { margin-top: .6rem; text-align: center; font-size: .72rem; color: var(--faint); line-height: 1.7; }
