@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.11.2"
+VERSION    = "2.11.3"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -369,6 +369,11 @@ def _full_charge_pv(vehicles):
                         continue
                     if active.get('restore'):
                         _evcc_post(url, f'vehicles/{name}/limitsoc/{active["restore"]}')
+                        # EVCC gives the vehicle's limit back to a loadpoint only when the car is
+                        # plugged in anew: with the car still connected the loadpoint stays on 100 %
+                        # and the limit never returns to the daily value (02.10.).
+                        if point:
+                            _evcc_post(url, f'loadpoints/{points.index(point) + 1}/limitsoc/{active["restore"]}')
                     del cfg[f'full_charge_{vin}']
                     last_full = cfg.get(f'last_full_charge_{vin}') or last_full
                     infos[vin] = {'state': 'scheduled', 'due': _due_day(last_full, days) if days > 0 else None,
