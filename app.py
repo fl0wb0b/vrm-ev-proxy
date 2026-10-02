@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.16.0"
+VERSION    = "2.16.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -319,7 +319,7 @@ def _eta_text(soc, limit, capacity, power_w, now=None):
         return ''
     now = now or time.time()
     hours = (limit - soc) / 100.0 * capacity / (power_w / 1000.0) / 0.92
-    return f'{int(limit)} % ' + _t('at') + ' ' + time.strftime('%H:%M', time.localtime(now + hours * 3600))
+    return f'{int(limit)} % · ' + _t('at') + ' ' + time.strftime('%H:%M', time.localtime(now + hours * 3600))
 
 def _kwh_since_full(sessions, title, last_full, away_kwh):
     """Energy charged since the last full charge: EVCC sessions of this vehicle started
@@ -515,7 +515,7 @@ def _charging_away(code, evcs_status, charging_ts, idle_since, now):
             and now - charging_ts < AWAY_CHARGE_MAX_AGE)
 
 CHARGING_STATE_UI = {
-    'Disconnected': ('🔌', 'Disconnected', '#6b7280'),
+    'Disconnected': ('🔌', 'Disconnected', '#98a4b3'),
     'Stopped':      ('⏸',  'Connected',    '#f59e0b'),
     'Charging':     ('⚡',  'Charging',     '#22c55e'),
     'Complete':     ('✅',  'Charged',      '#cdd3da'),
@@ -566,7 +566,15 @@ _req = threading.local()   # per-request language, set by the HTTP handler
 
 # English source text → German. Placeholders use str.format syntax.
 _DE = {
-    'This week': 'Diese Woche', 'at': 'um',
+    'Contact': 'Kontakt', 'Last 7 days': 'Letzte 7 Tage', 'Details & history': 'Details & Verlauf', 'Battery profile': 'Akkuprofil',
+    'Above the daily recommendation of {opt_max}%.': 'Über der Alltagsempfehlung von {opt_max} %.',
+    'Recommended up to {n} %': 'Empfohlen bis {n} %',
+    'Target and recommendation: {n} %': 'Ladeziel & Empfehlung: {n} %',
+    'Target {t} % · recommended up to {n} %': 'Ladeziel {t} % · Empfehlung bis {n} %',
+    'VRM poll {t} ago': 'VRM-Abruf vor {t}', 'Data stale': 'Daten veraltet', 'at': 'ca.', 'Target': 'Ladeziel', 'Solar share of this charge': 'Solaranteil dieser Ladung',
+    'Recommended up to {opt_max}%': 'Empfohlen bis {opt_max} %', 'Chart is being collected': 'Verlauf wird gesammelt',
+    'Updated {t} ago': 'Aktualisiert vor {t}', 'Data is stale – last VRM poll {t} ago': 'Daten veraltet – letzter VRM-Abruf vor {t}',
+    'Waiting for first data…': 'Warte auf erste Daten …',
     'Own picture URL (optional, wins over the choice)': 'Eigene Bild-URL (optional, hat Vorrang)',
     'Picture URL must start with http:// or https://.': 'Die Bild-URL muss mit http:// oder https:// beginnen.',
     'Last contact': 'Letzter Kontakt',
@@ -1146,7 +1154,7 @@ def _soc_color(soc):
 # ── SVG History Chart ──────────────────────────────────────────────────────────
 def _build_chart(history, opt_min, opt_max):
     if len(history) < 2:
-        return '<div style="color:#475569;text-align:center;padding:1rem;font-size:.8rem">' + _t('Not enough data yet (needs 2+ hours)') + '</div>'
+        return '<div style="color:var(--faint);text-align:center;padding:.4rem 0;font-size:.8rem">' + _t('Not enough data yet (needs 2+ hours)') + '</div>'
 
     W, H   = 440, 120
     PAD_L  = 28
@@ -1180,7 +1188,7 @@ def _build_chart(history, opt_min, opt_max):
         grid += (f'<line x1="{PAD_L}" y1="{y:.1f}" x2="{W - PAD_R}" y2="{y:.1f}" '
                  f'stroke="#1a2029" stroke-width="1"/>'
                  f'<text x="{PAD_L - 3}" y="{y + 4:.1f}" text-anchor="end" '
-                 f'fill="#475569" font-size="9">{pct}</text>')
+                 f'fill="#8a95a3" font-size="9">{pct}</text>')
 
     # Optimal boundary lines
     bound = ''
@@ -1209,7 +1217,7 @@ def _build_chart(history, opt_min, opt_max):
         if day not in seen_days and x > PAD_L + 20:
             seen_days.add(day)
             xlabels += (f'<text x="{x:.1f}" y="{H - 4}" text-anchor="middle" '
-                        f'fill="#475569" font-size="9">{day}</text>')
+                        f'fill="#8a95a3" font-size="9">{day}</text>')
 
     return (f'<svg viewBox="0 0 {W} {H}" style="width:100%;height:auto;display:block">'
             f'{zone}{grid}{bound}{line}{dot}{xlabels}</svg>')
@@ -1219,7 +1227,7 @@ def _build_chart(history, opt_min, opt_max):
 _CSS = """
 :root {
   --bg: #090c10; --card: #11161c; --card2: #151b22; --line: #212932;
-  --text: #e8eaed; --muted: #8b95a1; --faint: #5b6572;
+  --text: #e8eaed; --muted: #a3adb9; --faint: #8a95a3;
   --ok: #3ecf8e; --warn: #f5b73b; --bad: #ef5a5a; --silver: #cdd3da;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1242,14 +1250,26 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .container.wide { max-width: 1120px; }
 .vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); column-gap: 1.1rem; }
 /* every car has the same 8 rows; the rows of all cars line up (subgrid), so equal sections sit at equal heights */
-.vehs > .veh { display: grid; grid-template-rows: subgrid; grid-row: span 8; min-width: 0; }
-.vehs > .veh > .vcard { display: grid; grid-template-rows: subgrid; grid-row: 1 / span 8; margin-bottom: 1.1rem; }
+.vehs > .veh { display: grid; grid-template-rows: subgrid; grid-row: span 5; min-width: 0; }
+.vehs > .veh > .vcard { display: grid; grid-template-rows: subgrid; grid-row: 1 / span 5; margin-bottom: 1.1rem; }
+/* narrow screens: status first, photo after it */
+@media (max-width: 48rem) {
+  .vehs { grid-template-columns: 1fr; }
+  .vehs > .veh { display: block; grid-row: auto; }
+  .vcard, .vehs > .veh > .vcard { display: grid; grid-template-rows: repeat(5, auto); grid-row: auto; }
+  .vcard > .head { grid-row: 1; margin-top: 0; padding-top: 1.1rem; }
+  .vcard > .primary { grid-row: 2; }
+  .vcard > .socbar { grid-row: 3; padding-bottom: 1rem; }
+  .vcard > .vhero { grid-row: 4; }
+  .vcard > .last { grid-row: 5; }
+  .vhero::after { display: none; }
+}
 .card {
   background: var(--card); border-radius: 14px; padding: 1.1rem 1.3rem;
   margin-bottom: .85rem; border: 1px solid var(--line);
 }
 /* one card per vehicle */
-.vcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: .85rem; }
+.vcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: .85rem; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; }
 .vhero { position: relative; aspect-ratio: 16 / 9; background: #0a0a0b; }
 .vhero.none { aspect-ratio: auto; height: 0; background: none; }
 .vhero.none::after { display: none; }
@@ -1260,23 +1280,31 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .vi.last { padding-bottom: 1.2rem; }
 .vi.head { margin-top: -.4rem; }
 .vhead { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; }
-.vname { font-size: 1.15rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
-.vvin { font-size: .7rem; color: var(--faint); letter-spacing: .03em; margin-top: .1rem; overflow-wrap: anywhere; }
+.vname { font-size: 1.2rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.vi.primary .notes { padding-top: .6rem; }
+nav a { min-height: 44px; display: inline-flex; align-items: center; }
+.vdetails summary { min-height: 44px; display: flex; align-items: center; }
+nav a:focus-visible, .vdetails summary:focus-visible, a:focus-visible { outline: 2px solid var(--silver); outline-offset: 3px; }
+.notes:empty, .weekline:empty, .charge-summary:empty { display: none; }
+.vvin { font-size: .76rem; color: var(--faint); letter-spacing: .03em; margin-top: .1rem; overflow-wrap: anywhere; }
 .chips { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
 .chip { display: inline-flex; align-items: center; gap: .3rem; padding: .18rem .6rem; border-radius: 999px;
-        font-size: .72rem; font-weight: 600; border: 1px solid var(--line); background: var(--card2); color: var(--muted); }
+        font-size: .78rem; font-weight: 600; border: 1px solid var(--line); background: var(--card2); color: var(--muted); }
 .soc-row { display: flex; align-items: baseline; gap: .4rem; padding-top: .9rem; }
-.soc-num { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
-.soc-sub { margin-left: auto; font-size: .85rem; color: var(--muted); text-align: right; line-height: 1.45; }
+.soc-row .range { margin-left: auto; font-size: .9rem; color: var(--muted); }
+.soc-num { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
+.charge-summary { margin-top: .7rem; line-height: 1.45; }
+.charge-summary .goal { font-size: 1.05rem; font-weight: 600; color: var(--text); }
+.charge-summary .sub { font-size: .85rem; color: var(--muted); }
 .weekline { margin-top: .55rem; font-size: .74rem; color: var(--muted); text-align: center; min-height: 1.1em; }
 .stats-wrap { padding-top: 1rem; }
-.stats { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stats { display: flex; margin-top: .6rem; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .stat { flex: 1; padding: .7rem .2rem; text-align: center; }
 .stat + .stat { border-left: 1px solid var(--line); }
 .stat .label { margin-bottom: .2rem; }
 .stat .v { font-size: 1.05rem; font-weight: 600; color: var(--text); }
 .notes { padding-top: .9rem; display: flex; flex-direction: column; gap: .4rem; }
-.note { font-size: .78rem; color: var(--muted); padding: .1rem 0 .1rem .7rem; border-left: 2px solid var(--line); }
+.note { font-size: .85rem; line-height: 1.45; color: var(--muted); padding: .1rem 0 .1rem .7rem; border-left: 2px solid var(--line); }
 .note.warn { border-left-color: var(--warn); color: #e0c488; }
 .vdetails { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .7rem; }
 .vi .vdetails { margin-top: .9rem; }
@@ -1286,10 +1314,13 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .vdetails summary::before { content: "▸ "; }
 .vdetails[open] summary::before { content: "▾ "; }
 .vdetails .meta-row:first-of-type { margin-top: .5rem; }
+.legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin-top: .4rem; font-size: .76rem; color: var(--faint); }
+.data-status { text-align: center; font-size: .85rem; color: var(--faint); margin: -.6rem 0 1rem; }
+.data-status.stale { color: var(--warn); font-weight: 600; }
 .sysline { margin-top: .6rem; text-align: center; font-size: .72rem; color: var(--faint); line-height: 1.7; }
 .sysline b { color: var(--muted); font-weight: 500; }
-.label { font-size: .68rem; color: var(--faint); text-transform: uppercase;
-         letter-spacing: .07em; margin-bottom: .35rem; }
+.label { font-size: .74rem; color: var(--faint); text-transform: uppercase;
+         letter-spacing: .06em; margin-bottom: .35rem; }
 .value { font-size: 2rem; font-weight: 700; color: var(--text); }
 .value.big { font-size: 3.2rem; }
 .unit { font-size: .95rem; color: var(--muted); font-weight: 400; }
@@ -1323,12 +1354,11 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
   position: absolute; top: -4px; width: 2px; height: 16px;
   border-radius: 2px; transform: translateX(-50%);
 }
-.bar-labels {
-  position: relative; display: flex; justify-content: space-between;
-  font-size: .66rem; color: var(--faint); margin-top: .35rem;
-}
+.bar-labels { display: block; font-size: .78rem; color: var(--faint); margin-top: .35rem; }
+.bar-scale { display: flex; justify-content: space-between; }
+.bar-legend { margin-top: .25rem; color: var(--muted); line-height: 1.4; }
 .pin-label {
-  position: absolute; transform: translateX(-50%); font-size: .66rem; white-space: nowrap;
+  position: absolute; transform: translateX(-50%); font-size: .74rem; white-space: nowrap;
 }
 .meta-row {
   display: flex; justify-content: space-between; padding: .32rem 0;
@@ -1410,8 +1440,8 @@ def _page(title, nav_active, body, countdown=0, wide=False):
   <h1>⚡ {APP_NAME}</h1>
   <p class="subtitle">v{VERSION} &nbsp;·&nbsp; Victron VRM → EVCC</p>
   <nav>
-    <a href="/"         class="{'active' if nav_active=='status'   else ''}">📊 {_t('Status')}</a>
-    <a href="/settings" class="{'active' if nav_active=='settings' else ''}">⚙️ {_t('Settings')}</a>
+    <a href="/"         class="{'active' if nav_active=='status'   else ''}"{' aria-current="page"' if nav_active=='status' else ''}>📊 {_t('Status')}</a>
+    <a href="/settings" class="{'active' if nav_active=='settings' else ''}"{' aria-current="page"' if nav_active=='settings' else ''}>⚙️ {_t('Settings')}</a>
   </nav>
   {body}
   <div class="footer">{APP_NAME} v{VERSION}</div>
@@ -1477,7 +1507,17 @@ def build_status_page():
     up_str    = f'{uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s'
     ts_str    = time.strftime('%d.%m.%Y %H:%M:%S', time.localtime(ts)) if ts else '–'
 
-    error_box = f'<div class="error-box">⚠️ {_esc(error)}</div>' if error else ''
+    error_box = f'<div data-u="error">' + (f'<div class="error-box">⚠️ {_esc(error)}</div>' if error else '') + '</div>'
+    stale_ui  = bool(ts) and age > max(180, 3 * _interval())
+    def _ago(sec):
+        return (f'{sec} s' if sec < 90 else f'{sec // 60} min' if sec < 5400 else f'{sec // 3600} h')
+    if not ts:
+        status_txt, status_cls = _t('Waiting for first data…'), 'stale'
+    elif stale_ui:
+        status_txt, status_cls = _t('Data is stale – last VRM poll {t} ago', t=_ago(age)), 'stale'
+    else:
+        status_txt, status_cls = _t('VRM poll {t} ago', t=_ago(age)), ''
+    data_status = f'<div class="data-status {status_cls}" data-u="data-status">{status_txt}</div>'
     evcc_url = str(_get('EVCC_URL', '')).rstrip('/')
     live     = _evcc_live(evcc_url) if evcc_url and vehicles else {}
     sessions = _evcc_sessions(evcc_url) if evcc_url and vehicles else []
@@ -1534,22 +1574,24 @@ def build_status_page():
             state_label = _t(state_label)
             bar_color = _soc_color(soc)
 
-            warnings = ''
+            warnings = ''          # short, shown right under the SoC
+            warnings_detail = ''   # the explanations, in the details
 
             # Warning: above optimal range
             if soc > opt_max:
                 advice = ('Reduce charging limit to protect the battery.' if bat_type == 'NMC'
                           else 'OK for occasional full charge, but limit to 80% for daily use.')
-                warnings += (f'<div class="note warn">⚠️ '
-                             f'{_t("SoC ({soc}%) is above the optimal maximum of {opt_max}% for {bat_type}.", soc=soc, opt_max=opt_max, bat_type=bat_type)} '
-                             f'{_t(advice)}</div>')
+                warnings += f'<div class="note warn">⚠️ {_t("Above the daily recommendation of {opt_max}%.", opt_max=opt_max)}</div>'
+                warnings_detail += (f'<div class="note warn">⚠️ '
+                                    f'{_t("SoC ({soc}%) is above the optimal maximum of {opt_max}% for {bat_type}.", soc=soc, opt_max=opt_max, bat_type=bat_type)} '
+                                    f'{_t(advice)}</div>')
 
             # LFP full charge reminder
             if bat_type == 'LFP' and bat['full_reminder_days']:
                 remind_after = _get_int('FULL_REMINDER_DAYS', bat['full_reminder_days'])
                 if last_full and (time.time() - last_full) / 86400 > remind_after:
                     days_overdue = int((time.time() - last_full) / 86400)
-                    warnings += (f'<div class="note">ℹ️ '
+                    warnings_detail += (f'<div class="note">ℹ️ '
                                  f'{_t("LFP BMS balancing: last full charge was {d} days ago. Consider charging to 100% soon.", d=days_overdue)}</div>')
 
             # Periodic full charge from PV
@@ -1558,25 +1600,30 @@ def build_status_page():
             fc_on  = _get_int('FULL_CHARGE_DAYS', 0) > 0 or _get_int('FULL_CHARGE_KWH', 0) > 0
             fc_msg = _full_charge_text(fc) if fc_on or fc.get('state') == 'active' else ''
             if fc_msg:
-                warnings += f'<div class="note">☀️ {fc_msg}</div>'
+                if fc.get('state') == 'active':   # a full charge is running right now: that is news
+                    warnings += f'<div class="note">☀️ {fc_msg}</div>'
+                else:
+                    warnings_detail += f'<div class="note">☀️ {fc_msg}</div>'
 
             # Optimal zone band in bar
             zone_html = (f'<div class="bar-zone" style="left:{opt_min}%;'
                          f'width:{opt_max - opt_min}%;background:#22c55e"></div>')
 
-            # Limit marker (orange) – only if meaningfully below 100% and not overlapping
-            limit_html = lim_label = ''
-            if limit_soc < 98 and abs(soc - limit_soc) >= 3:
-                limit_html = (f'<div class="bar-marker" style="left:{limit_soc}%;'
-                              f'background:#f59e0b"></div>')
-                lim_label  = (f'<span class="pin-label" style="left:{limit_soc}%;color:#f59e0b">'
-                              f'▲ {limit_soc}%</span>')
-
-            # Optimal max marker (battery type color)
-            opt_html  = (f'<div class="bar-marker" style="left:{opt_max}%;'
-                         f'background:{bat["color"]};width:2px;opacity:.8"></div>')
-            opt_label = (f'<span class="pin-label" style="left:{opt_max}%;color:{bat["color"]}">'
-                         f'╷ {opt_max}%</span>')
+            # Target = what EVCC actually charges to (else the car's own limit if it is below 100 %).
+            # Same source as the ETA, so marker and time never disagree.
+            ename0 = cfg.get(f'evcc_vehicle_{vin}')
+            target = (live.get('limit') or {}).get(ename0) or (limit_soc if limit_soc < 100 else None)
+            opt_html = (f'<div class="bar-marker" style="left:{opt_max}%;'
+                        f'background:{bat["color"]};width:2px;opacity:.9"></div>')
+            limit_html = ''
+            if target and target != opt_max and target < 100:
+                limit_html = f'<div class="bar-marker" style="left:{target}%;background:#f59e0b"></div>'
+            if target and target == opt_max:
+                legend = _t('Target and recommendation: {n} %', n=opt_max)
+            elif target:
+                legend = _t('Target {t} % · recommended up to {n} %', t=target, n=opt_max)
+            else:
+                legend = _t('Recommended up to {n} %', n=opt_max)
 
             # Power row
             power_html = ''
@@ -1602,38 +1649,50 @@ def build_status_page():
             is_charging = state == 'Charging'
             ename  = cfg.get(f'evcc_vehicle_{vin}')
             solar  = (live.get('solar') or {}).get(ename)
-            eta    = (_eta_text(soc, (live.get('limit') or {}).get(ename) or (limit_soc if limit_soc < 100 else None),
-                                veh.get('capacity') or 60, power_w) if is_charging else '')
+            eta    = (_eta_text(soc, target, veh.get('capacity') or 60, power_w) if is_charging else '')
             title  = (live.get('titles') or {}).get(ename)
             week   = _week_stats(sessions, title) if title else None
-            power_sub = ((f'⚡ {_dec(power_w / 1000)} kW' + (f' · ☀ {int(solar)} %' if solar is not None else '')
-                          + (f'<br><span style="color:var(--faint)">{eta}</span>' if eta else ''))
-                         if is_charging and power_w > 100 else '')
-            week_html = (f'{_t("This week")} {_dec(week[0])} kWh · ☀ {int(week[1])} %' if week else '')
+            charging_now = is_charging and power_w > 100
+            summary_html = ''
+            if charging_now:
+                sub = f'⚡ {_dec(power_w / 1000)} kW'
+                sub += f' · ☀ {_t("Solar share of this charge")} {int(solar)} %' if solar is not None else ''
+                goal = f'<div class="goal">{_t("Target")} {eta}</div>' if eta else ''
+                summary_html = f'{goal}<div class="sub">{sub}</div>'
+            elif last_full:
+                summary_html = f'<div class="sub">{_t("Last full charge")}: {lf_str}</div>'
+            week_html = (f'{_t("Last 7 days")} {_dec(week[0])} kWh · ☀ {int(week[1])} %' if week else '')
             odo_str = f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")
 
+            has_chart = '<svg' in chart
+            chart_html = (f'<div class="label" style="margin:.9rem 0 .4rem">{_t("SoC History – 7 days")}</div>{chart}'
+                          f'<div class="legend"><span style="color:#22c55e">━</span> {_t("Optimal zone")} '
+                          f'<span style="color:#22c55e">╷</span> {_t("Recommended up to {opt_max}%", opt_max=opt_max)} '
+                          f'<span style="color:#e8eaed">━</span> SoC</div>' if has_chart
+                          else f'<div class="label" style="margin:.9rem 0 0">{_t("SoC History – 7 days")} · '
+                               f'<span style="text-transform:none;letter-spacing:0">{_t("Chart is being collected")}</span></div>')
             veh_cols.append(f"""
         <div class="vcard">
           {_car_visual(vin, veh_name, is_charging)}
           <div class="vi head">
             <div class="vhead">
-              <div style="min-width:0">
-                <div class="vname">{_esc(shown_name)}</div>
-                <div class="vvin">{_esc(vin)}</div>
-              </div>
+              <h2 class="vname">{_esc(shown_name)}</h2>
               <div class="chips" data-u="{_esc(vin)}:chips">
                 <span class="chip{' pulse' if is_charging else ''}" style="color:{state_color};border-color:{state_color}55">{icon} {state_label}</span>
-                {bat_badge}
               </div>
             </div>
           </div>
-          <div class="vi">
-            <div class="soc-row" data-u="{_esc(vin)}:soc">
-              <span class="soc-num" style="color:{bar_color}">{soc}</span><span class="unit">%</span>
-              <span class="soc-sub">{power_sub}</span>
+          <div class="vi primary">
+            <div data-u="{_esc(vin)}:soc">
+              <div class="soc-row">
+                <span class="soc-num">{soc}</span><span class="unit">%</span>
+                <span class="range">{int(range_km)} km {_t('Range')}</span>
+              </div>
+              <div class="charge-summary">{summary_html}</div>
             </div>
+            <div class="notes" data-u="{_esc(vin)}:notes">{warnings}</div>
           </div>
-          <div class="vi">
+          <div class="vi socbar">
             <div class="bar-wrap">
               {zone_html}
               <div class="bar-fill{' charging' if is_charging else ''}" data-u="{_esc(vin)}:fill" style="width:{soc}%;--c:{bar_color};background-color:{bar_color};position:relative;z-index:1"></div>
@@ -1641,39 +1700,26 @@ def build_status_page():
               {opt_html}
             </div>
             <div class="bar-labels" data-u="{_esc(vin)}:labels">
-              <span>0%</span>
-              {lim_label}
-              {opt_label}
-              <span>100%</span>
-            </div>
-          </div>
-          <div class="vi stats-wrap">
-            <div class="stats" data-u="{_esc(vin)}:stats">
-              <div class="stat"><div class="label">{_t('Range')}</div><div class="v">{int(range_km)} km</div></div>
-              <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
-              <div class="stat"><div class="label">{_t('Last contact')}</div><div class="v">{lc_short}</div></div>
-            </div>
-            <div class="weekline" data-u="{_esc(vin)}:week">{week_html}</div>
-          </div>
-          <div class="vi"><div class="notes" data-u="{_esc(vin)}:notes">{warnings}</div></div>
-          <div class="vi">
-            <div class="label" style="margin:.9rem 0 .4rem">{_t('SoC History – 7 days')}</div>
-            <div data-u="{_esc(vin)}:chart">{chart}</div>
-            <div style="display:flex;gap:1rem;margin-top:.4rem;font-size:.68rem;color:var(--faint)">
-              <span style="color:#22c55e">━</span> {_t('Optimal zone')}
-              <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
-              <span style="color:#e8eaed">━</span> SoC
+              <div class="bar-scale"><span>0 %</span><span>100 %</span></div>
+              <div class="bar-legend">{legend}</div>
             </div>
           </div>
           <div class="vi last">
             <details class="vdetails">
-              <summary>{_t('Battery type')} · {bat_type}</summary>
-              <div class="meta-row"><span>{_t('Battery type')}</span><span class="meta-val">{bat_type} · {_t(bat['note'])}</span></div>
+              <summary>{_t('Details & history')}</summary>
+              <div class="stats" data-u="{_esc(vin)}:stats">
+                <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
+                <div class="stat"><div class="label">{_t('Last EV contact')}</div><div class="v">{lc_short}</div></div>
+              </div>
+              <div class="weekline" data-u="{_esc(vin)}:week">{week_html}</div>
+              <div class="notes" data-u="{_esc(vin)}:notes2">{warnings_detail}</div>
+              <div data-u="{_esc(vin)}:chart">{chart_html}</div>
+              <div class="meta-row"><span>VIN</span><span class="meta-val">{_esc(vin)}</span></div>
+              <div class="meta-row"><span>{_t('Battery profile')}</span><span class="meta-val">{bat_type} · {_t(bat['note'])}</span></div>
               <div class="meta-row"><span>{_t('Optimal range')}</span><span class="meta-val">{opt_min}% – {opt_max}%</span></div>
               <div class="meta-row"><span>{_t('Time above {opt_max}%', opt_max=opt_max)}</span><span class="meta-val">{ta_str}</span></div>
               <div class="meta-row"><span>{_t('Charge cycles')}</span><span class="meta-val">{cycles_str}</span></div>
               <div class="meta-row"><span>{_t('Last full charge')}</span><span class="meta-val">{lf_str}</span></div>
-              <div class="meta-row"><span>{_t('Last EV contact')}</span><span class="meta-val">{lc_str}</span></div>
             </details>
           </div>
         </div>
@@ -1686,7 +1732,7 @@ def build_status_page():
     # System status: one quiet line, details collapsed
     main_cards += f"""
         <details class="vdetails" style="max-width:520px;margin:1.2rem auto 0;border-top:1px solid var(--line)">
-          <summary data-u="sys"><span class="dot green"></span>{_t('Bridge')} {_t('Online')} · {_t('Data age')} {age}s</summary>
+          <summary data-u="sys"><span class="dot {'red' if stale_ui or not ts else 'green'}"></span>{_t('Bridge')} {_t('Data stale') if (stale_ui or not ts) else _t('Online')}</summary>
           <div data-u="sysrows">
           <div class="meta-row"><span>VRM Site ID</span><span class="meta-val">{_esc(_get('VRM_SITE_ID','–'))}</span></div>
           <div class="meta-row"><span>{_t('Last update')}</span><span class="meta-val">{ts_str}</span></div>
@@ -1696,7 +1742,7 @@ def build_status_page():
           </div>
         </details>"""
 
-    body = error_box + main_cards
+    body = data_status + error_box + main_cards
     return _page('Status', 'status', body, countdown=countdown_val, wide=len(veh_cols) > 1)
 
 
@@ -1719,7 +1765,7 @@ def build_settings_page(saved=False, error_msg=''):
         opts = ([('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('No picture'))]
                 + [(k, v[0]) for k, v in LOCAL_IMAGES.items()] + list(CAR_IMAGES.items()))
         options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(v)}</option>' for k, v in opts)
-        car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:#475569;font-size:.7rem">{_esc(vin)}</span></label>'
+        car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:var(--faint);font-size:.74rem">{_esc(vin)}</span></label>'
                         f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>'
                         f'<input type="text" name="CAR_IMAGE_URL_{_esc(vin)}" value="{_esc(_load_cfg().get(f"car_image_url_{vin}") or "")}" '
                         f'placeholder="{_t("Own picture URL (optional, wins over the choice)")}" style="margin-top:.4rem">')
