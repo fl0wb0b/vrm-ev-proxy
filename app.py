@@ -10,6 +10,7 @@ import datetime
 import html
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -17,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.11.4"
+VERSION    = "2.12.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -511,6 +512,13 @@ _req = threading.local()   # per-request language, set by the HTTP handler
 
 # English source text → German. Placeholders use str.format syntax.
 _DE = {
+    # vehicle pictures
+    'Vehicle pictures': 'Fahrzeugbilder',
+    'Automatic (from model and VIN)': 'Automatisch (nach Modell und VIN)',
+    'Own drawing, no download': 'Eigene Zeichnung, ohne Download',
+    'Unknown vehicle picture: {v}': 'Unbekanntes Fahrzeugbild: {v}',
+    'Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.':
+        'Die Bilder sind Tesla-Renderings von github.com/teslamotors/custom-wraps und werden von deinem Browser direkt von GitHub geladen – hier wird nichts gespeichert.',
     # navigation / page frame
     'Status': 'Status', 'Settings': 'Einstellungen', 'API': 'API',
     'in {n}s': 'in {n}s',
@@ -1013,10 +1021,57 @@ _CAR_BODY = {
                'M42 19 C47 16 53 15 61 15 L78 15 C84 15 88 18 92 21 L42 21 Z'),
 }
 
+# Vehicle pictures: Tesla's own renderings from github.com/teslamotors/custom-wraps. They are NOT
+# copied into this repository (no licence file there) – the browser loads them from GitHub when
+# the status page is opened. Offline or blocked → the drawing below stays visible.
+CAR_IMAGE_URL = 'https://raw.githubusercontent.com/teslamotors/custom-wraps/master/{id}/vehicle_image.png'
+CAR_IMAGES = {   # id → label (id is the folder name in that repository)
+    'model3':                 'Model 3',
+    'model3-2024-base':       'Model 3 (2024+) Standard & Premium',
+    'model3-2024-performance': 'Model 3 (2024+) Performance',
+    'modely':                 'Model Y',
+    'modely-2025-base':       'Model Y (2025+) Standard',
+    'modely-2025-premium':    'Model Y (2025+) Premium',
+    'modely-2025-performance': 'Model Y (2025+) Performance',
+    'modely-l':               'Model Y L',
+    'models-2021':            'Model S',
+    'models-2025-plaid':      'Model S Plaid (2025)',
+    'modelx-2021':            'Model X',
+    'cybertruck':             'Cybertruck',
+}
+_VIN_YEAR = {c: 2010 + i for i, c in enumerate('ABCDEFGH')}
+_VIN_YEAR.update({c: 2018 + i for i, c in enumerate('JKLMN')})   # J=2018 … N=2022
+_VIN_YEAR.update({'P': 2023, 'R': 2024, 'S': 2025, 'T': 2026, 'V': 2027, 'W': 2028, 'X': 2029, 'Y': 2030})
+
+def _car_image_id(vin, name):
+    """The chosen picture ('drawing' = none), else a guess from model and VIN model year."""
+    chosen = _load_cfg().get(f'car_image_{vin}')
+    if chosen == 'drawing' or chosen in CAR_IMAGES:
+        return chosen
+    kind = _car_kind(name, vin)
+    year = _VIN_YEAR.get((vin or '  ')[9:10].upper(), 0)
+    if kind == 'model3':
+        return 'model3-2024-base' if year >= 2024 else 'model3'
+    if kind == 'modely':
+        return 'modely-2025-base' if year >= 2025 else 'modely'
+    return 'drawing'
+
+def _car_visual(vin, name, color):
+    """Picture box: the drawing underneath, the Tesla rendering on top (hidden if it fails to load)."""
+    img_id = _car_image_id(vin, name)
+    img = ''
+    if img_id in CAR_IMAGES:
+        img = (f'<img src="{CAR_IMAGE_URL.format(id=img_id)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
+               f'onerror="this.style.display=\'none\'" '
+               f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 58%">')
+    return (f'<div style="position:relative;flex:none;width:150px;height:96px;margin-right:.8rem;overflow:hidden;'
+            f'border-radius:10px;background:#0b0f14;display:flex;align-items:center;justify-content:center">'
+            f'{_car_svg(_car_kind(name, vin), color)}{img}</div>')
+
 def _car_svg(kind, color):
     body, window = _CAR_BODY.get(kind, _CAR_BODY['car'])
     return (f'<svg viewBox="0 0 120 44" width="78" height="29" role="img" aria-hidden="true" '
-            f'style="flex:none;margin-right:.7rem">'
+            f'style="flex:none">'
             f'<path d="{body}" fill="{color}" fill-opacity=".85"/>'
             f'<path d="{window}" fill="#0f172a" fill-opacity=".55"/>'
             f'<circle cx="28" cy="34" r="7.5" fill="#0f172a" stroke="#475569" stroke-width="2"/>'
@@ -1122,6 +1177,9 @@ nav a {
 }
 nav a.active, nav a:hover { background: #1e40af; color: #fff; border-color: #1e40af; }
 .container { width: 100%; max-width: 480px; }
+.container.wide { max-width: 1120px; }
+.vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; align-items: start; }
+.veh { min-width: 0; }
 .card {
   background: #1e293b; border-radius: 12px; padding: 1.1rem 1.4rem;
   margin-bottom: .85rem; border: 1px solid #334155;
@@ -1220,7 +1278,7 @@ code { background: #0f172a; padding: .1rem .35rem; border-radius: 4px;
 """
 
 # ── Page wrapper ───────────────────────────────────────────────────────────────
-def _page(title, nav_active, body, countdown=0):
+def _page(title, nav_active, body, countdown=0, wide=False):
     return f"""<!DOCTYPE html>
 <html lang="{_lang()}">
 <head>
@@ -1230,7 +1288,7 @@ def _page(title, nav_active, body, countdown=0):
 <style>{_CSS}</style>
 </head>
 <body>
-<div class="container">
+<div class="container{' wide' if wide else ''}">
   <h1>⚡ {APP_NAME}</h1>
   <p class="subtitle">v{VERSION} &nbsp;·&nbsp; Victron VRM → EVCC</p>
   <nav>
@@ -1286,6 +1344,7 @@ def build_status_page():
     countdown_val = next_poll + 2   # reload shortly after the poll has finished
 
     main_cards = ''
+    veh_cols = []
 
     if not vehicles:
         main_cards = '<div class="card" style="text-align:center;padding:2rem;color:#f59e0b">⏳ ' + _t('Waiting for first VRM poll…') + '</div>'
@@ -1393,11 +1452,11 @@ def build_status_page():
                          f'color:{bat["color"]};border:1px solid {bat["color"]}44">'
                          f'{bat_type}</span>')
 
-            main_cards += warnings + f"""
+            veh_cols.append(warnings + f"""
         <div class="card" style="border-color:#334155">
           <div style="display:flex;align-items:center;margin-bottom:.6rem">
-            {_car_svg(_car_kind(veh_name, vin), bar_color)}
-            <div style="font-size:.85rem;font-weight:600;color:#94a3b8">
+            {_car_visual(vin, veh_name, bar_color)}
+            <div style="font-size:.85rem;font-weight:600;color:#94a3b8;min-width:0;overflow-wrap:anywhere">
               {_esc(veh_name)}
               <div style="font-size:.7rem;font-weight:400;color:#475569">VIN: {_esc(vin)}</div>
             </div>
@@ -1472,11 +1531,15 @@ def build_status_page():
             <span class="meta-val">{lc_str}</span>
           </div>
         </div>
-"""
+""")
+    if veh_cols:
+        # Several cars sit next to each other (they wrap under each other on narrow screens)
+        main_cards = ('<div class="vehs">' + ''.join(f'<div class="veh">{c}</div>' for c in veh_cols) + '</div>'
+                      if len(veh_cols) > 1 else ''.join(veh_cols))
 
-    # Global meta card
+    # Global meta card (stays narrow and centred under the grid)
     main_cards += f"""
-        <div class="card">
+        <div class="card"{' style="max-width:480px;margin:1rem auto 0"' if len(veh_cols) > 1 else ''}>
           <div class="meta-row">
             <span>{_t('Bridge')}</span>
             <span class="meta-val"><span class="dot green"></span>{_t('Online')}</span>
@@ -1489,7 +1552,7 @@ def build_status_page():
         </div>"""
 
     body = error_box + main_cards
-    return _page('Status', 'status', body, countdown=countdown_val)
+    return _page('Status', 'status', body, countdown=countdown_val, wide=len(veh_cols) > 1)
 
 
 # ── Settings page ──────────────────────────────────────────────────────────────
@@ -1505,6 +1568,17 @@ def build_settings_page(saved=False, error_msg=''):
     opt_max  = _get('OPT_MAX', str(bat['opt_max']))
     reminder = _get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
+    car_rows = []
+    for vin, veh in (_cache.get('vehicles') or {}).items():
+        current = _load_cfg().get(f'car_image_{vin}') or 'auto'
+        opts = [('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('Own drawing, no download'))] + list(CAR_IMAGES.items())
+        options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(v)}</option>' for k, v in opts)
+        car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:#475569;font-size:.7rem">{_esc(vin)}</span></label>'
+                        f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>')
+    car_image_html = ''
+    if car_rows:
+        car_image_html = (f'<div class="section-title">{_t("Vehicle pictures")}</div>' + ''.join(car_rows) +
+                          f'<div class="hint">{_t("Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.")}</div>')
     evcc_url = _get('EVCC_URL', '')
     fc_days  = _get('FULL_CHARGE_DAYS', '0')
     fc_kwh   = _get('FULL_CHARGE_KWH', '0')
@@ -1618,6 +1692,7 @@ def build_settings_page(saved=False, error_msg=''):
         <div class="hint">{_t('Subtracted from the solar forecast – house consumption the car cannot use.')}</div>
 
 
+        {car_image_html}
         <div class="section-title">{_t('Interface')}</div>
         <label>{_t('Language')}</label>
         <select name="LANGUAGE">{lang_opts}</select>
@@ -1720,6 +1795,12 @@ def _parse_settings(params):
         if evcc_url and not evcc_url.startswith(('http://', 'https://')):
             return {}, _t('EVCC URL must start with http:// or https://.')
         updates['EVCC_URL'] = evcc_url or None   # cleared → feature off
+    for key, val in params.items():
+        if key.startswith('CAR_IMAGE_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[10:]):
+            val = val.strip()
+            if val not in ('auto', 'drawing') and val not in CAR_IMAGES:
+                return {}, _t('Unknown vehicle picture: {v}', v=val)
+            updates[f'car_image_{key[10:]}'] = None if val == 'auto' else val
     token = params.get('VRM_TOKEN', '').strip()
     if token:
         updates['VRM_TOKEN'] = token
