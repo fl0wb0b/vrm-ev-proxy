@@ -18,7 +18,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen, Request
 
-VERSION    = "2.13.0"
+VERSION    = "2.13.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -1184,8 +1184,10 @@ nav a:hover { color: var(--text); border-color: #38424e; }
 nav a.active { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
 .container { width: 100%; max-width: 520px; }
 .container.wide { max-width: 1120px; }
-.vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 1.1rem; align-items: start; }
-.veh { min-width: 0; }
+.vehs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); column-gap: 1.1rem; }
+/* every car has the same 8 rows; the rows of all cars line up (subgrid), so equal sections sit at equal heights */
+.vehs > .veh { display: grid; grid-template-rows: subgrid; grid-row: span 8; min-width: 0; }
+.vehs > .veh > .vcard { display: grid; grid-template-rows: subgrid; grid-row: 1 / span 8; margin-bottom: 1.1rem; }
 .card {
   background: var(--card); border-radius: 14px; padding: 1.1rem 1.3rem;
   margin-bottom: .85rem; border: 1px solid var(--line);
@@ -1195,25 +1197,29 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .vhero { position: relative; aspect-ratio: 16 / 9; background: #0a0a0b; }
 .vhero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
                 background: linear-gradient(to bottom, rgba(17,22,28,0), var(--card)); pointer-events: none; }
-.vbody { padding: 0 1.3rem 1.2rem; margin-top: -.4rem; position: relative; z-index: 1; }
+.vi { padding: 0 1.3rem; position: relative; z-index: 1; min-width: 0; }
+.vi.last { padding-bottom: 1.2rem; }
+.vi.head { margin-top: -.4rem; }
 .vhead { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; }
 .vname { font-size: 1.15rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
 .vvin { font-size: .7rem; color: var(--faint); letter-spacing: .03em; margin-top: .1rem; overflow-wrap: anywhere; }
 .chips { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
 .chip { display: inline-flex; align-items: center; gap: .3rem; padding: .18rem .6rem; border-radius: 999px;
         font-size: .72rem; font-weight: 600; border: 1px solid var(--line); background: var(--card2); color: var(--muted); }
-.soc-row { display: flex; align-items: baseline; gap: .4rem; margin-top: .9rem; }
+.soc-row { display: flex; align-items: baseline; gap: .4rem; padding-top: .9rem; }
 .soc-num { font-size: 3.4rem; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
 .soc-sub { margin-left: auto; font-size: .85rem; color: var(--muted); }
-.stats { display: flex; margin-top: 1rem; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.stats-wrap { padding-top: 1rem; }
+.stats { display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .stat { flex: 1; padding: .7rem .2rem; text-align: center; }
 .stat + .stat { border-left: 1px solid var(--line); }
 .stat .label { margin-bottom: .2rem; }
 .stat .v { font-size: 1.05rem; font-weight: 600; color: var(--text); }
-.notes { margin-top: .9rem; display: flex; flex-direction: column; gap: .4rem; }
+.notes { padding-top: .9rem; display: flex; flex-direction: column; gap: .4rem; }
 .note { font-size: .78rem; color: var(--muted); padding: .1rem 0 .1rem .7rem; border-left: 2px solid var(--line); }
 .note.warn { border-left-color: var(--warn); color: #e0c488; }
 .vdetails { margin-top: .9rem; border-top: 1px solid var(--line); padding-top: .7rem; }
+.vi .vdetails { margin-top: .9rem; }
 .vdetails summary { cursor: pointer; font-size: .74rem; color: var(--muted); text-transform: uppercase;
                     letter-spacing: .06em; list-style: none; }
 .vdetails summary::-webkit-details-marker { display: none; }
@@ -1490,12 +1496,11 @@ def build_status_page():
             shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
             power_sub = (f'⚡ {_dec(power_w / 1000)} kW' if state == 'Charging' and power_w > 100 else '')
             odo_str = f"{int(odometer):,}".replace(",", "." if _lang() == "de" else ",")
-            notes_html = f'<div class="notes">{warnings}</div>' if warnings else ''
 
             veh_cols.append(f"""
         <div class="vcard">
           {_car_visual(vin, veh_name, bar_color)}
-          <div class="vbody">
+          <div class="vi head">
             <div class="vhead">
               <div style="min-width:0">
                 <div class="vname">{_esc(shown_name)}</div>
@@ -1506,10 +1511,14 @@ def build_status_page():
                 {bat_badge}
               </div>
             </div>
+          </div>
+          <div class="vi">
             <div class="soc-row">
               <span class="soc-num" style="color:{bar_color}">{soc}</span><span class="unit">%</span>
               <span class="soc-sub">{power_sub}</span>
             </div>
+          </div>
+          <div class="vi">
             <div class="bar-wrap">
               {zone_html}
               <div class="bar-fill" style="width:{soc}%;background:{bar_color};position:relative;z-index:1"></div>
@@ -1522,21 +1531,25 @@ def build_status_page():
               {opt_label}
               <span>100%</span>
             </div>
+          </div>
+          <div class="vi stats-wrap">
             <div class="stats">
               <div class="stat"><div class="label">{_t('Range')}</div><div class="v">{int(range_km)} km</div></div>
               <div class="stat"><div class="label">{_t('Odometer')}</div><div class="v">{odo_str} km</div></div>
               <div class="stat"><div class="label">{_t('Last contact')}</div><div class="v">{lc_short}</div></div>
             </div>
-            {notes_html}
-            <div class="vdetails" style="border-top:none;padding-top:0">
-              <div class="label" style="margin:.9rem 0 .4rem">{_t('SoC History – 7 days')}</div>
-              {chart}
-              <div style="display:flex;gap:1rem;margin-top:.4rem;font-size:.68rem;color:var(--faint)">
-                <span style="color:#22c55e">━</span> {_t('Optimal zone')}
-                <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
-                <span style="color:#e8eaed">━</span> SoC
-              </div>
+          </div>
+          <div class="vi"><div class="notes">{warnings}</div></div>
+          <div class="vi">
+            <div class="label" style="margin:.9rem 0 .4rem">{_t('SoC History – 7 days')}</div>
+            {chart}
+            <div style="display:flex;gap:1rem;margin-top:.4rem;font-size:.68rem;color:var(--faint)">
+              <span style="color:#22c55e">━</span> {_t('Optimal zone')}
+              <span style="color:{bat['color']}">╷</span> {_t('{opt_max}% limit', opt_max=opt_max)}
+              <span style="color:#e8eaed">━</span> SoC
             </div>
+          </div>
+          <div class="vi last">
             <details class="vdetails">
               <summary>{_t('Battery type')} · {bat_type}</summary>
               <div class="meta-row"><span>{_t('Battery type')}</span><span class="meta-val">{bat_type} · {_t(bat['note'])}</span></div>
