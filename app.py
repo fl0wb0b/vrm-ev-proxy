@@ -1139,7 +1139,7 @@ def _car_visual(vin, name, charging=False):
     return (f'<div class="vhero{" charging" if charging else ""}" data-u="{_esc(vin)}:hero">'
             f'<img src="{_esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer" '
             f'onerror="this.parentNode.className=\'vhero none\'" '
-            f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 53%"></div>')
+            f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 57%"></div>')
 
 
 def _soc_color(soc):
@@ -1274,7 +1274,7 @@ nav a.active { background: var(--text); color: var(--bg); border-color: var(--te
 .vhero.none { aspect-ratio: auto; height: 0; background: none; }
 .vhero.none::after { display: none; }
 .vhero.none + .vi.head { margin-top: 0; padding-top: 1.3rem; }
-.vhero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 90px;
+.vhero::after { content: ""; position: absolute; inset: auto 0 0 0; height: 34px;
                 background: linear-gradient(to bottom, rgba(17,22,28,0), var(--card)); pointer-events: none; }
 .vi { padding: 0 1.3rem; position: relative; z-index: 1; min-width: 0; }
 .vi.last { padding-bottom: 1.2rem; }
