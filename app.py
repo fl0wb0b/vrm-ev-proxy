@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.16.3"
+VERSION    = "2.17.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -136,16 +136,13 @@ def _check_evcc_loadpoints(vehicles):
     url = str(_get('EVCC_URL')).rstrip('/')
     if not url or not any(v['data']['charging_state'] == 'Charging' for v in vehicles.values()):
         return
-    try:
-        with urlopen(Request(f'{url}/api/state'), timeout=5) as resp:
-            state = json.loads(resp.read())
-        state = state.get('result', state)
-    except Exception as exc:
-        print(f'[EVCC] State query failed: {exc}', flush=True)
+    state, problem = _evcc_state(url, 5)
+    if problem:
+        print('[EVCC] ' + problem[0].format(**problem[1]), flush=True)
         return
     now = time.time()
     for lp, point in enumerate(state.get('loadpoints') or [], 1):
-        if not point.get('charging') or point.get('vehicleDetectionActive'):
+        if not _lp_allowed(lp) or not point.get('charging') or point.get('vehicleDetectionActive'):
             continue
         if not point.get('vehicleName'):
             # Charging without any car: a switched socket never reports 'plugged in',
@@ -263,6 +260,7 @@ def _evcc_sessions(url):
             sessions = json.loads(resp.read())
         if isinstance(sessions, dict):
             sessions = sessions.get('result') or []
+        sessions = [x for x in sessions if isinstance(x, dict)] if isinstance(sessions, list) else []
     except Exception as exc:
         print(f'[FULL] EVCC sessions query failed: {exc}', flush=True)
     with _lock:
@@ -310,7 +308,8 @@ def _evcc_live(url):
         data = {'problem': problem}
         print('[LIVE] ' + problem[0].format(**problem[1]), flush=True)
     else:
-        data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()}}
+        data = {'solar': {}, 'limit': {}, 'titles': {n: (v.get('title') or n) for n, v in (state.get('vehicles') or {}).items()},
+                'capacity': {n: _num(v.get('capacity'), 0) for n, v in (state.get('vehicles') or {}).items()}}
         for point in state.get('loadpoints') or []:
             name = point.get('vehicleName')
             if name and point.get('connected'):
@@ -396,17 +395,17 @@ def _full_charge_pv(vehicles):
         for point in points:
             name = point.get('vehicleName')
             vin = _match_vin(point, vehicles) if name else None
-            if vin and name in evcc_vehicles:
+            if vin and name in evcc_vehicles and not cfg.get(f'evcc_vehicle_manual_{vin}'):
                 cfg[f'evcc_vehicle_{vin}'] = name
         # EVCC's database knows every VIN, plugged in or not – it wins
         by_upper = {vin.upper(): vin for vin in vehicles}
         for db_vin, name in _evcc_vins_from_db().items():
-            if db_vin in by_upper and name in evcc_vehicles:
+            if db_vin in by_upper and name in evcc_vehicles and not cfg.get(f'evcc_vehicle_manual_{by_upper[db_vin]}'):
                 cfg[f'evcc_vehicle_{by_upper[db_vin]}'] = name
 
         infos = {}
         for vin, veh in vehicles.items():
-            name = cfg.get(f'evcc_vehicle_{vin}')
+            name = _evcc_name(cfg, vin)
             if name not in evcc_vehicles:
                 infos[vin] = {'state': 'unmapped'}
                 continue
@@ -415,6 +414,9 @@ def _full_charge_pv(vehicles):
             last_full = cfg.get(f'last_full_charge_{vin}') or cfg.setdefault(f'full_charge_ref_{vin}', now)
             active = cfg.get(f'full_charge_{vin}')
             point = next((p for p in points if p.get('vehicleName') == name and p.get('connected')), None)
+            if point and not _lp_allowed(points.index(point) + 1):
+                infos[vin] = {'state': 'excluded'}
+                continue
             max_w = _loadpoint_max_w(point) if point else 0
             try:
                 if active:
@@ -472,7 +474,11 @@ def _full_charge_pv(vehicles):
                     if not point:
                         info['state'] = 'unplugged'
                         continue
-                    need = (100 - soc) / 100 * (veh['capacity'] or 60) / FULL_CHARGE_LOSSES
+                    capacity = veh['capacity'] or _num(evcc_vehicles[name].get('capacity'), 0) or 60
+                    need = (100 - soc) / 100 * capacity / FULL_CHARGE_LOSSES
+                    if not _solar_forecast(state):
+                        info['state'] = 'noforecast'
+                        continue
                     surplus = _pv_surplus_today_kwh(state, now, max_w, base_w)
                     info.update(pv=surplus, need=need)
                     if surplus < need:
@@ -691,6 +697,25 @@ _DE = {
         '{url}/api/state sieht nicht nach EVCC aus – EVCC_URL prüfen (Adresse und Port, kein zusätzlicher Pfad).',
     'EVCC not reachable at {url}: {err}': 'EVCC unter {url} nicht erreichbar: {err}',
     'EVCC_URL "{url}" must start with http:// or https://.': 'EVCC_URL „{url}“ muss mit http:// oder https:// beginnen.',
+    'Full charge due – EVCC provides no solar forecast, so it cannot start. Set up a solar forecast in EVCC.':
+        'Vollladung fällig – EVCC liefert keine Solarprognose, daher kann sie nicht starten. In EVCC eine Solarprognose einrichten.',
+    'Full charge: this car is on a loadpoint the proxy is not set to control.':
+        'Vollladung: Das Auto hängt an einem Ladepunkt, den der Proxy nicht steuern soll.',
+    'Vehicles': 'Fahrzeuge',
+    'Picture / model': 'Bild / Modell',
+    'Vehicle in EVCC': 'Fahrzeug in EVCC',
+    'Battery type': 'Akkutyp',
+    'Automatic': 'Automatisch',
+    'not found yet': 'noch nicht gefunden',
+    'Like the global setting': 'Wie die globale Einstellung',
+    'Everything left on automatic is detected from VRM and EVCC. Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.': 'Was auf „Automatisch“ bleibt, wird aus VRM und EVCC erkannt. Bilder sind Tesla-Renderings von github.com/teslamotors/custom-wraps, die dein Browser von GitHub lädt – hier wird nichts gespeichert.',
+    'Controlled loadpoints': 'Gesteuerte Ladepunkte',
+    'Loadpoint': 'Ladepunkt',
+    'Vehicle': 'Fahrzeug',
+    'The proxy only changes limits and restarts vehicle detection on the ticked loadpoints.': 'Der Proxy ändert Limits und startet die Fahrzeugerkennung nur an den angehakten Ladepunkten.',
+    'Enter the EVCC URL and save – the loadpoints EVCC reports then appear here.': 'EVCC-URL eintragen und speichern – danach erscheinen hier die Ladepunkte, die EVCC meldet.',
+    'Unknown EVCC vehicle: {v}': 'Unbekanntes EVCC-Fahrzeug: {v}',
+    'Select at least one loadpoint.': 'Mindestens einen Ladepunkt auswählen.',
     'Next full charge from PV due: {t}.': 'Nächste Vollladung mit PV fällig: {t}.',
     'Subtracted from the solar forecast – house consumption the car cannot use.':
         'Wird von der Solarprognose abgezogen – Hausverbrauch, den das Auto nicht nutzen kann.',
@@ -791,6 +816,28 @@ def _bat():
     """Return battery preset dict for configured type."""
     return BATTERY_PRESETS.get(_get('BATTERY_TYPE', 'LFP'), BATTERY_PRESETS['LFP'])
 
+def _car_bat(vin, cfg=None):
+    """(type, preset, opt_min, opt_max) of one car: its own type from the settings, else the global one.
+    The global OPT_MIN/OPT_MAX only apply to the global type – another type brings its own range."""
+    cfg = cfg if cfg is not None else _load_cfg()
+    glob = _get('BATTERY_TYPE', 'LFP')
+    glob = glob if glob in BATTERY_PRESETS else 'LFP'
+    own = cfg.get(f'battery_type_{vin}')
+    if own in BATTERY_PRESETS and own != glob:
+        bat = BATTERY_PRESETS[own]
+        return own, bat, bat['opt_min'], bat['opt_max']
+    bat = BATTERY_PRESETS[glob]
+    return glob, bat, _get_int('OPT_MIN', bat['opt_min']), _get_int('OPT_MAX', bat['opt_max'])
+
+def _evcc_name(cfg, vin):
+    """EVCC vehicle of a car: the one chosen in the settings, else the one found automatically."""
+    return cfg.get(f'evcc_vehicle_manual_{vin}') or cfg.get(f'evcc_vehicle_{vin}')
+
+def _lp_allowed(n):
+    """May the proxy act on EVCC loadpoint n (1-based)? Settings list the controlled ones; empty = all."""
+    raw = str(_get('EVCC_LOADPOINTS', '')).strip()
+    return not raw or str(n) in raw.split(',')
+
 def _interval():
     return max(10, _get_int('POLL_INTERVAL', 60))
 
@@ -823,7 +870,7 @@ def poll_vrm():
                           if r.get('Device') == 'Electric Vehicle' and r.get('dbusPath')]
 
             if not ev_records:
-                raise ValueError('No EV device found in VRM – is the Tesla configured in VRM?')
+                raise ValueError('No EV device found in VRM – is the vehicle set up in VRM?')
 
             # Group records by instance to support multiple EVs
             by_instance = {}
@@ -893,7 +940,7 @@ def poll_vrm():
                     last_contact  = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact')
                                          or ev.get('/LastEvContact'), 0)
                     odometer      = _num(ev.get('/Odometer'), 0)
-                    veh_capacity  = capacity or _num(ev.get('/BatteryCapacity'), 0)
+                    veh_capacity  = _num(cfg.get(f'capacity_{vin}'), 0) or capacity or _num(ev.get('/BatteryCapacity'), 0)
 
                     # ── Sticky VIN: hold last known real VIN while VRM catches up ──
                     now_t = time.time()
@@ -1004,7 +1051,7 @@ def poll_vrm():
                     elif week_start_key not in cfg:
                         cfg[week_start_key] = now
 
-                    if soc > opt_max:
+                    if soc > _car_bat(vin, cfg)[3]:
                         # Real elapsed time (capped), not the nominal interval – so
                         # error backoffs and settings changes don't skew the counter.
                         cfg[time_above_key] = cfg.get(time_above_key, 0) + elapsed
@@ -1087,6 +1134,10 @@ def _full_charge_text(fc):
     if st == 'pv':
         return _t('Full charge due – not enough PV today (forecast {pv} kWh, needed {need} kWh).',
                   pv=_dec(fc['pv']), need=_dec(fc['need']))
+    if st == 'excluded':
+        return _t('Full charge: this car is on a loadpoint the proxy is not set to control.')
+    if st == 'noforecast':
+        return _t('Full charge due – EVCC provides no solar forecast, so it cannot start. Set up a solar forecast in EVCC.')
     if st == 'night':
         return _t('Full charge due – starts today once there is enough sun.')
     return ''
@@ -1174,10 +1225,7 @@ def _car_visual(vin, name, charging=False):
             f'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 57%"></div>')
 
 
-def _soc_color(soc):
-    bat     = _bat()
-    opt_min = _get_int('OPT_MIN', bat['opt_min'])
-    opt_max = _get_int('OPT_MAX', bat['opt_max'])
+def _soc_color(soc, opt_min, opt_max):
     if soc < opt_min:    return '#ef4444'   # below min → red
     if soc <= opt_max:   return '#22c55e'   # in range  → green
     return '#f59e0b'                         # above max → amber warning
@@ -1345,6 +1393,10 @@ nav a:focus-visible, .vdetails summary:focus-visible, a:focus-visible { outline:
 .vdetails summary::-webkit-details-marker { display: none; }
 .vdetails summary::before { content: "▸ "; }
 .vdetails[open] summary::before { content: "▾ "; }
+.car-set { border-top: 1px solid var(--line); margin-top: 1rem; padding-top: .6rem; }
+.car-set-title { font-weight: 600; margin-bottom: .2rem; }
+label.check { display: flex; gap: .5rem; align-items: center; margin: .35rem 0; }
+label.check input { width: auto; }
 .vd-title { font-size: .74rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .vdetails .meta-row:first-of-type { margin-top: .5rem; }
 .legend { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: .4rem 0 .9rem; font-size: .76rem; color: var(--faint); }
@@ -1608,7 +1660,8 @@ def build_status_page():
             state     = data['charging_state']
             icon, state_label, state_color = CHARGING_STATE_UI.get(state, ('❓', state, '#6b7280'))
             state_label = _t(state_label)
-            bar_color = _soc_color(soc)
+            bat_type, bat, opt_min, opt_max = _car_bat(vin, cfg)
+            bar_color = _soc_color(soc, opt_min, opt_max)
 
             warnings = ''          # short, shown right under the SoC
             warnings_detail = ''   # the explanations, in the details
@@ -1647,7 +1700,7 @@ def build_status_page():
 
             # Target = what EVCC actually charges to (else the car's own limit if it is below 100 %).
             # Same source as the ETA, so marker and time never disagree.
-            ename0 = cfg.get(f'evcc_vehicle_{vin}')
+            ename0 = _evcc_name(cfg, vin)
             target = (live.get('limit') or {}).get(ename0) or (limit_soc if limit_soc < 100 else None)
             opt_html = (f'<div class="bar-marker" style="left:{opt_max}%;'
                         f'background:{bat["color"]};width:2px;opacity:.9"></div>')
@@ -1683,9 +1736,9 @@ def build_status_page():
                         else time.strftime('%d.%m. %H:%M', time.localtime(last_contact)) if last_contact else '–')
             shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
             is_charging = state == 'Charging'
-            ename  = cfg.get(f'evcc_vehicle_{vin}')
+            ename  = _evcc_name(cfg, vin)
             solar  = (live.get('solar') or {}).get(ename)
-            eta    = (_eta_text(soc, target, veh.get('capacity') or 60, power_w) if is_charging else '')
+            eta    = (_eta_text(soc, target, veh.get('capacity') or (live.get('capacity') or {}).get(ename) or 60, power_w) if is_charging else '')
             title  = (live.get('titles') or {}).get(ename)
             week   = _week_stats(sessions, title) if title else None
             charging_now = is_charging and power_w > 100
@@ -1795,21 +1848,59 @@ def build_settings_page(saved=False, error_msg=''):
     opt_max  = _get('OPT_MAX', str(bat['opt_max']))
     reminder = _get('FULL_REMINDER_DAYS', str(bat.get('full_reminder_days') or ''))
     masked   = ('*' * 8 + token[-6:]) if len(token) > 6 else _t('(not set)')
+    evcc_url = _get('EVCC_URL', '')
+    # Scan EVCC: its vehicles and loadpoints (None when no address is set or EVCC does not answer)
+    scan, scan_problem = (_evcc_state(evcc_url.rstrip('/'), 4) if evcc_url else (None, None))
+    evcc_vehicles = (scan or {}).get('vehicles') or {}
+    cfg_now = _load_cfg()
     car_rows = []
     for vin, veh in (_cache.get('vehicles') or {}).items():
-        current = _load_cfg().get(f'car_image_{vin}') or 'auto'
+        v = _esc(vin)
+        current = cfg_now.get(f'car_image_{vin}') or 'auto'
         opts = ([('auto', _t('Automatic (from model and VIN)')), ('drawing', _t('No picture'))]
-                + [(k, v[0]) for k, v in LOCAL_IMAGES.items()] + list(CAR_IMAGES.items()))
-        options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(v)}</option>' for k, v in opts)
-        car_rows.append(f'<label>{_esc(veh.get("name") or vin)} <span style="color:var(--faint);font-size:.74rem">{_esc(vin)}</span></label>'
-                        f'<select name="CAR_IMAGE_{_esc(vin)}">{options}</select>'
-                        f'<input type="text" name="CAR_IMAGE_URL_{_esc(vin)}" value="{_esc(_load_cfg().get(f"car_image_url_{vin}") or "")}" '
-                        f'placeholder="{_t("Own picture URL (optional, wins over the choice)")}" style="margin-top:.4rem">')
+                + [(k, x[0]) for k, x in LOCAL_IMAGES.items()] + list(CAR_IMAGES.items()))
+        options = ''.join(f'<option value="{k}"{" selected" if k == current else ""}>{_esc(x)}</option>' for k, x in opts)
+        manual = cfg_now.get(f'evcc_vehicle_manual_{vin}') or ''
+        found = cfg_now.get(f'evcc_vehicle_{vin}') or ''
+        names = dict((n, (x.get('title') or n)) for n, x in evcc_vehicles.items())
+        if manual and manual not in names:
+            names[manual] = manual
+        auto_label = _t('Automatic') + (f' ({_esc(names.get(found, found))})' if found else f' ({_t("not found yet")})')
+        evcc_opts = (f'<option value="">{auto_label}</option>'
+                     + ''.join(f'<option value="{_esc(n)}"{" selected" if n == manual else ""}>{_esc(t)}</option>' for n, t in names.items()))
+        own_bat = cfg_now.get(f'battery_type_{vin}') or ''
+        bat_opts = (f'<option value="">{_t("Like the global setting")}</option>'
+                    + ''.join(f'<option value="{k}"{" selected" if k == own_bat else ""}>{k}</option>' for k in BATTERY_PRESETS))
+        cap_auto = veh.get('capacity') or _num((evcc_vehicles.get(manual or found) or {}).get('capacity'), 0)
+        car_rows.append(
+            f'<div class="car-set"><div class="car-set-title">{_esc(veh.get("name") or vin)} '
+            f'<span style="color:var(--faint);font-size:.74rem">{v}</span></div>'
+            f'<label>{_t("Picture / model")}</label><select name="CAR_IMAGE_{v}">{options}</select>'
+            f'<input type="text" name="CAR_IMAGE_URL_{v}" value="{_esc(cfg_now.get(f"car_image_url_{vin}") or "")}" '
+            f'placeholder="{_t("Own picture URL (optional, wins over the choice)")}" style="margin-top:.4rem">'
+            f'<label>{_t("Vehicle in EVCC")}</label><select name="CAR_EVCC_{v}">{evcc_opts}</select>'
+            f'<label>{_t("Battery type")}</label><select name="CAR_BAT_{v}">{bat_opts}</select>'
+            f'<label>{_t("Battery Capacity (kWh)")}</label>'
+            f'<input type="number" name="CAR_CAP_{v}" value="{_esc(cfg_now.get(f"capacity_{vin}") or "")}" min="1" max="200" step="0.1" '
+            f'placeholder="{_t("Automatic")}{f" ({cap_auto:g} kWh)" if cap_auto else ""}"></div>')
     car_image_html = ''
     if car_rows:
-        car_image_html = (f'<div class="section-title">{_t("Vehicle pictures")}</div>' + ''.join(car_rows) +
-                          f'<div class="hint">{_t("Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.")}</div>')
-    evcc_url = _get('EVCC_URL', '')
+        car_image_html = (f'<div class="section-title">{_t("Vehicles")}</div>' + ''.join(car_rows) +
+                          f'<div class="hint">{_t("Everything left on automatic is detected from VRM and EVCC. Pictures are Tesla renderings from github.com/teslamotors/custom-wraps, loaded by your browser from GitHub – nothing is stored here.")}</div>')
+    lp_html = ''
+    if scan_problem:
+        lp_html = f'<div class="error-box">⚠️ {_esc(_t(scan_problem[0], **scan_problem[1]))}</div>'
+    elif scan is not None:
+        lps = scan.get('loadpoints') or []
+        rows = ''
+        for n, p in enumerate(lps, 1):
+            who = p.get('vehicleTitle') or p.get('vehicleName') or '–'
+            rows += (f'<label class="check"><input type="checkbox" name="LP_{n}"{" checked" if _lp_allowed(n) else ""}> '
+                     f'{n}: {_esc(p.get("title") or _t("Loadpoint"))} <span style="color:var(--faint)">· {_t("Vehicle")}: {_esc(who)}</span></label>')
+        lp_html = (f'<input type="hidden" name="EVCC_LP_COUNT" value="{len(lps)}">' + rows +
+                   f'<div class="hint">{_t("The proxy only changes limits and restarts vehicle detection on the ticked loadpoints.")}</div>')
+    else:
+        lp_html = f'<div class="hint">{_t("Enter the EVCC URL and save – the loadpoints EVCC reports then appear here.")}</div>'
     fc_days  = _get('FULL_CHARGE_DAYS', '0')
     fc_kwh   = _get('FULL_CHARGE_KWH', '0')
     fc_base  = _get('FULL_CHARGE_BASE_LOAD', '1500')
@@ -1904,6 +1995,9 @@ def build_settings_page(saved=False, error_msg=''):
         <label>{_t('EVCC URL')}</label>
         <input type="text" name="EVCC_URL" value="{evcc_url}" placeholder="{_t('e.g. http://192.168.1.10:7070')}">
         <div class="hint">{_t('If an EVCC loadpoint keeps showing a car that is no longer plugged in, EVCC is told to identify the vehicle again. Loadpoints are detected automatically. Leave empty to disable.')}</div>
+
+        <label>{_t('Controlled loadpoints')}</label>
+        {lp_html}
 
         <label>{_t('EVCC database (read-only)')}</label>
         <input type="text" name="EVCC_DB" value="{evcc_db}" placeholder="{EVCC_DB_DEFAULT}">
@@ -2036,6 +2130,33 @@ def _parse_settings(params):
             if val not in ('auto', 'drawing') and val not in CAR_IMAGES and val not in LOCAL_IMAGES:
                 return {}, _t('Unknown vehicle picture: {v}', v=val)
             updates[f'car_image_{key[10:]}'] = None if val == 'auto' else val
+    for key, val in params.items():
+        val = val.strip()
+        if key.startswith('CAR_EVCC_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[9:]):
+            if val and not re.fullmatch(r'[A-Za-z0-9:_.-]{1,64}', val):
+                return {}, _t('Unknown EVCC vehicle: {v}', v=val)
+            updates[f'evcc_vehicle_manual_{key[9:]}'] = val or None
+        elif key.startswith('CAR_BAT_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[8:]):
+            if val and val not in BATTERY_PRESETS:
+                return {}, _t('Unknown battery type: {v}', v=val)
+            updates[f'battery_type_{key[8:]}'] = val or None
+        elif key.startswith('CAR_CAP_') and re.fullmatch(r'[A-Za-z0-9_-]{1,32}', key[8:]):
+            try:
+                cap = float(val) if val else None
+            except ValueError:
+                return {}, _t('{key}: "{raw}" is not a valid number.', key='CAPACITY', raw=val)
+            if cap is not None and not 1 <= cap <= 200:
+                return {}, _t('{key} must be between {lo} and {hi}.', key='CAPACITY', lo=1, hi=200)
+            updates[f'capacity_{key[8:]}'] = cap
+    if 'EVCC_LP_COUNT' in params:   # the scan was shown: store which loadpoints are controlled
+        try:
+            count = int(params['EVCC_LP_COUNT'])
+        except ValueError:
+            count = 0
+        chosen = [n for n in range(1, count + 1) if f'LP_{n}' in params]
+        if count and not chosen:
+            return {}, _t('Select at least one loadpoint.')
+        updates['EVCC_LOADPOINTS'] = None if len(chosen) == count else ','.join(map(str, chosen))
     token = params.get('VRM_TOKEN', '').strip()
     if token:
         updates['VRM_TOKEN'] = token
