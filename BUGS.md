@@ -14,6 +14,11 @@ Status: ✅ behoben · ⚠️ teilweise / mit Annahme · ⏭️ bewusst nicht ge
 | E2 | `minutes_to_full_charge` fehlte | keine Ladeende-Prognose in EVCC | ✅ 9e98921 |
 | E3 | README: URL `http://ip:8080` angegeben, Template hängt aber selbst `:{{port}}` an | EVCC ruft `http://ip:8080:8080` auf → nichts funktioniert | ✅ 9e98921 |
 | E4 | VIN-Vergleich case-sensitive, unbekannte VIN wird stumm auf das 1. Fahrzeug umgeleitet | falsches Auto bei mehreren EVs, kein Hinweis | ✅ 9e98921 |
+| E5 | Vollladung startete nur an einem Tag, dessen Prognose die ganze Lücke bis 100 % deckt, und das Limit ging abends/am nächsten Tag zurück | ein täglich genutztes Auto startet jeden Tag weit unter 100 % → Vollladung kam nie (16.10.: Y 14 Tage fällig, „PV reicht nicht“) | ✅ v2.19.0: Start bei PV-Leistung über der Grundlast, Limit bleibt bis 100 % |
+| E6 | Rücksetzung schreibt ein Ladepunktlimit (z. B. 80 %), der nächste Start setzte nur das Fahrzeuglimit | Auto blieb an derselben Wallbox bei 80 % stehen, solange es nicht abgesteckt wurde | ✅ v2.19.0: Start setzt auch ein Ladepunktlimit < 100 % auf 100 % |
+| E7 | Neu-Erkennung, wenn das gezeigte Auto laut VRM „nicht eingesteckt“ ist, während irgendein anderes lädt | M3 lädt am Schuko (VRM: ChargingState 0) → Garage neu erkannt → evcc setzte das an der Wallbox ladende Y dorthin, Y an zwei Ladepunkten (15./16.10.) | ✅ v2.19.0: nur wenn ein ladendes Auto zur Leistung des Ladepunkts passt; bei genau einem wird es direkt gesetzt |
+| E8 | Schuko-Ladepunkt meldet nie „abgesteckt“ → ein einmal falsch zugeordnetes, volles Auto bleibt dort | evcc schaltet die Steckdose nie ein, das richtige Auto lädt nicht | ✅ v2.19.0: steckt das gezeigte Auto laut VRM an der Victron-Station oder ist unterwegs, kommt das einzige andere Auto zu Hause dorthin |
+| E9 | Laden an der Schuko-Steckdose sieht VRM nicht (Tesla: ChargingState 0) | Proxy meldet evcc „nicht angesteckt“, evcc erkennt das Auto am Schuko nie | ✅ v2.19.0: steigt der SoC zu Hause in ≥ 2 Schritten um ≥ 2 % binnen 1 h, gilt das Auto als ladend (Leistung aus dem Anstieg) |
 
 ## Victron-Datenmodell (`com.victronenergy.ev`)
 
