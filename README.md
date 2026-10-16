@@ -217,6 +217,7 @@ Die mitgelieferten JPEGs in [`images/`](images/) sind **KI-generierte Studio-Dar
 | `GET` | `/api/1/vehicles/<VIN>/vehicle_data` | Tesla-Format `response.response.charge_state`; HTTP 503 ohne Daten oder bei zu alten Daten. |
 | `POST` | `/api/1/vehicles/<VIN>/command/<command>` | Bestätigter No-Op, z. B. `wake_up`, `charge_start`, `set_charging_amps`. |
 | `GET` | `/api/health` | JSON-Status `ok`, `error` oder `stale`, Alter, Fehler, Site-ID und Version; HTTP 503 bei error/stale. |
+| `GET` | `/api/full_charge` | Vollladung je Auto: Zustand (`scheduled`, `active`, `night`, `unplugged`, `paused`, …), Fälligkeitstag `due`, `days_left` (0 = heute), kWh seit der letzten 100-%-Ladung, Text wie auf der Statusseite. Für Mitteilungen, z. B. aus Node-RED auf dem GX. |
 | `GET` | `/api/raw` | Zwischengespeicherte VRM-Rohwerte je Fahrzeug samt zugeordneten Ladestationswerten. |
 | `GET` | `/img/<id>.jpg` | Mitgeliefertes Modellbild, sofern die ID unterstützt wird. |
 

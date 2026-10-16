@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.19.0"
+VERSION    = "2.20.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -811,6 +811,7 @@ _DE = {
     'Save Settings': 'Einstellungen speichern',
     'API Endpoints': 'API-Endpunkte',
     'Status page': 'Statusseite', 'Health check (JSON)': 'Health-Check (JSON)',
+    'Full charge plan per car (JSON)': 'Vollladungs-Plan je Auto (JSON)',
     # validation messages
     'VRM Site ID must be numeric.': 'Die VRM Site-ID muss eine Zahl sein.',
     'Unknown battery type: {v}': 'Unbekannter Akkutyp: {v}',
@@ -1229,6 +1230,47 @@ def _full_charge_text(fc):
 # Own simple drawings, inline: no image downloads (the proxy makes no outside requests)
 # and no third-party artwork. The body takes the SoC colour.
 _TESLA_WMI = ('5YJ', '7SA', 'LRW', 'XP7', 'SFZ')
+
+def _shown_name(name, vin):
+    """Name to show for a car: VRM's name, else 'Model 3'/'Model Y' from the VIN for Teslas."""
+    if name != vin:
+        return name
+    return {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(name, vin), name)
+
+def _full_charge_api():
+    """Periodic full charge per car as JSON – for notifications elsewhere (e.g. Node-RED on the GX).
+
+    state: scheduled | active | night | unplugged | paused | nopv | excluded | unmapped | off.
+    due / days_left: day the full charge becomes due (by days) and how many calendar days
+    that is from today – 0 = due today, negative = overdue. kwh / kwh_lim: energy since the
+    last 100 % and the threshold that makes it due as well (0 = days only).
+    """
+    with _lock:
+        vehicles = dict(_cache['vehicles'])
+        infos = dict(_cache['full_charge_info'])
+    cfg = _load_cfg()
+    today = datetime.date.fromtimestamp(time.time())
+    out = {}
+    for vin, veh in vehicles.items():
+        fc = infos.get(vin) or {}
+        due = fc.get('due')
+        last_full = cfg.get(f'last_full_charge_{vin}')
+        out[vin] = {
+            'name':      _shown_name(veh['name'], vin),
+            'soc':       veh['data']['battery_level'],
+            'charging':  veh['data']['charging_state'],
+            'state':     fc.get('state') or 'off',
+            'due':       datetime.date.fromtimestamp(due).isoformat() if due else None,
+            'days_left': (datetime.date.fromtimestamp(due) - today).days if due else None,
+            'kwh':       round(fc.get('kwh') or 0.0, 1),
+            'kwh_lim':   fc.get('kwh_lim') or 0,
+            'since':     datetime.datetime.fromtimestamp(fc['since']).isoformat(timespec='minutes')
+                         if fc.get('since') else None,
+            'last_full': datetime.datetime.fromtimestamp(last_full).isoformat(timespec='minutes')
+                         if last_full else None,
+            'message':   _full_charge_text(fc) if fc else '',
+        }
+    return out
 
 def _car_kind(name, vin):
     """'model3' or 'modely' for Teslas (from the name VRM gives, else the 4th VIN character: 3 / Y), else 'car'."""
@@ -1815,7 +1857,7 @@ def build_status_page():
             lc_short = (time.strftime('%H:%M', time.localtime(last_contact)) if last_contact and
                         datetime.date.fromtimestamp(last_contact) == datetime.date.today()
                         else time.strftime('%d.%m. %H:%M', time.localtime(last_contact)) if last_contact else '–')
-            shown_name = {'model3': 'Model 3', 'modely': 'Model Y'}.get(_car_kind(veh_name, vin), veh_name) if veh_name == vin else veh_name
+            shown_name = _shown_name(veh_name, vin)
             is_charging = state == 'Charging'
             ename  = _evcc_name(cfg, vin)
             solar  = (live.get('solar') or {}).get(ename)
@@ -2114,6 +2156,10 @@ def build_settings_page(saved=False, error_msg=''):
         <span class="meta-val">{_t('Health check (JSON)')}</span>
       </div>
       <div class="meta-row">
+        <span><a href="/api/full_charge" target="_blank" style="color:var(--silver);text-decoration:none"><code>/api/full_charge</code></a></span>
+        <span class="meta-val">{_t('Full charge plan per car (JSON)')}</span>
+      </div>
+      <div class="meta-row">
         <span><a href="/api/raw" target="_blank" style="color:var(--silver);text-decoration:none"><code>/api/raw</code></a></span>
         <span class="meta-val">{_t('Raw VRM values (debug)')}</span>
       </div>
@@ -2296,6 +2342,8 @@ class Handler(BaseHTTPRequestHandler):
                 'status': status, 'error': error, 'data_age': age,
                 'site_id': _get('VRM_SITE_ID'), 'version': VERSION,
             }, 200 if status == 'ok' else 503)
+        elif path == '/api/full_charge':
+            self._json(_full_charge_api())
         elif path == '/api/raw':
             # Debug: raw VRM values of each EV and the EVCS it is plugged into
             with _lock:
