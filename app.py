@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.0"
+VERSION    = "2.20.1"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -75,14 +75,20 @@ def _connection(ev):
 def _evcs_instance(connection):
     return int(_num(str(connection).split(':')[-1], -1))
 
-def _station_owners(by_instance):
+def _station_owners(by_instance, records=None):
     """Map EVCS instance -> EV instance that is actually plugged into it.
 
     VRM keeps /Mgmt/Connection of a car that has left, so several EVs can point
     at the same station – but only one can be plugged in. Prefer the EV that
-    reports activity itself (ChargingState not 0/1/255), then the most recently
-    seen one (/LastUpdated/EvContact).
+    reports activity itself (ChargingState not 0/1/255). Two active cars happen
+    when the other one charges on a Schuko socket (16.10.): then the station's
+    phases decide – a car reporting one phase can't take the station's
+    multi-phase power – and else the current owner stays. Only then the most
+    recently seen one (/LastUpdated/EvContact) – that alone flipped the owner on
+    every poll and with it which car got the station's power.
     """
+    with _lock:
+        previous = dict(_cache['station_owner'])
     best = {}
     for inst, ev in by_instance.items():
         station = _evcs_instance(_connection(ev))
@@ -91,10 +97,25 @@ def _station_owners(by_instance):
         code   = int(_num(ev.get('/ChargingState'), 0))
         active = code not in (0, 1, 255)
         seen   = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact'), 0)
-        rank   = (active, seen)
+        fit    = 0
+        if records is not None:
+            _, evcs = _find_evcs(records, str(station))
+            if evcs:
+                live = sum(1 for k in ('/Ac/L1/Power', '/Ac/L2/Power', '/Ac/L3/Power')
+                           if _num(evcs.get(k), 0) > 100)
+                phases = int(_num(ev.get('/Ac/NumberOfPhases'), 0))
+                if code == 3 and _num(evcs.get('/Ac/Power'), 0) < 100:
+                    fit = -1          # charges, but the station delivers nothing: it's elsewhere
+                elif live >= 2 and phases:
+                    fit = 1 if phases >= 2 else -1
+        stays  = previous.get(station) == inst
+        rank   = (fit >= 0, active, fit, stays, seen)
         if station not in best or rank > best[station][0]:
             best[station] = (rank, inst)
-    return {station: inst for station, (_, inst) in best.items()}
+    owners = {station: inst for station, (_, inst) in best.items()}
+    with _lock:
+        _cache['station_owner'].update(owners)
+    return owners
 
 def _evcc_redetect(url, lp, reason):
     """Ask EVCC to identify the vehicle on loadpoint <lp> (1-based) again."""
@@ -141,12 +162,23 @@ def _plugged_at_station(veh):
     status = veh['raw']['evcs'].get('/Status')
     return veh['raw']['evcs_device'] is not None and status is not None and int(_num(status, 0)) != 0
 
-def _socket_car(point, vehicles):
+def _charging_at_station(veh):
+    """The car charges at the Victron station right now – the station delivers power to it."""
+    return (_plugged_at_station(veh) and int(_num(veh['raw']['evcs'].get('/Status'), 0)) == 2
+            and veh['data']['charging_state'] == 'Charging')
+
+def _on_real_charger(name, points):
+    """EVCC shows this vehicle on a connected loadpoint that is a real charger (not a switched
+    socket) – such a charger reports plug state itself, so the car is there."""
+    return bool(name) and any(p.get('vehicleName') == name and p.get('connected')
+                              and not p.get('chargerFeatureSwitchDevice') for p in points)
+
+def _socket_car(point, vehicles, points=()):
     """VIN of the car to put on a switched-socket loadpoint that shows the wrong one – else None.
 
     A Schuko socket never reports 'unplugged', so EVCC keeps whatever car it once put
-    there. If that car is plugged into the Victron station or away from home, it can't
-    be on the socket; with exactly one other car at home, that one is (16.10.: the full
+    there. If that car charges at the Victron station right now or is away from home,
+    it can't be on the socket; with exactly one other car at home, that one is (16.10.: the full
     Model Y stayed on the Schuko loadpoint, EVCC never switched it on for the Model 3).
     """
     if not point.get('chargerFeatureSwitchDevice') or not point.get('vehicleName'):
@@ -155,11 +187,30 @@ def _socket_car(point, vehicles):
     if not vin:
         return None
     shown = vehicles[vin]
-    if not (_plugged_at_station(shown) or _num(shown['raw']['ev'].get('/AtSite'), 1) == 0):
+    # Only on clear evidence: charging at the station right now, away from home, or EVCC
+    # shows it on a real charger as well. With both cars idle VRM can't tell which one is
+    # plugged into the station (16.10.).
+    if not (_charging_at_station(shown) or _num(shown['raw']['ev'].get('/AtSite'), 1) == 0
+            or _on_real_charger(point.get('vehicleName'), points)):
         return None
+    cfg = _load_cfg()
     others = [v for v, veh in vehicles.items() if v != vin
-              and _num(veh['raw']['ev'].get('/AtSite'), 1) == 1 and not _plugged_at_station(veh)]
+              and _num(veh['raw']['ev'].get('/AtSite'), 1) == 1 and not _plugged_at_station(veh)
+              and not _on_real_charger(_evcc_name(cfg, v), points)]
     return others[0] if len(others) == 1 else None
+
+EVCC_FIX_CONFIRM = 90   # seconds a planned vehicle fix must be seen unchanged before it is made
+
+def _fix_confirmed(lp, plan, now):
+    """True once the same fix for loadpoint <lp> was planned for EVCC_FIX_CONFIRM seconds.
+    A fix that only shows up for one poll (a wrong owner of the station for a moment)
+    is never made – otherwise two cars got swapped in EVCC every five minutes (16.10.)."""
+    with _lock:
+        pend = _cache['fix_pending'].get(lp)
+        if not pend or pend[0] != plan:
+            _cache['fix_pending'][lp] = (plan, now)
+            return False
+        return now - pend[1] >= EVCC_FIX_CONFIRM
 
 def _evcc_fix_vehicle(url, lp, vins, reason):
     """Put the car charging on loadpoint <lp> there. With exactly one candidate whose EVCC
@@ -196,17 +247,20 @@ def _check_evcc_loadpoints(vehicles):
         print('[EVCC] ' + problem[0].format(**problem[1]), flush=True)
         return
     now = time.time()
+    planned = set()
     for lp, point in enumerate(state.get('loadpoints') or [], 1):
         if not _lp_allowed(lp) or point.get('vehicleDetectionActive'):
             continue
-        socket_vin = _socket_car(point, vehicles)
+        socket_vin = _socket_car(point, vehicles, state.get('loadpoints') or [])
         if socket_vin:
-            with _lock:
-                if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
-                    continue
-                _cache['evcc_redetect_ts'][lp] = now
-            _evcc_fix_vehicle(url, lp, [socket_vin],
-                              f'switched socket shows {point.get("vehicleTitle")}, which is plugged in elsewhere')
+            planned.add(lp)
+            if _fix_confirmed(lp, ('socket', socket_vin), now):
+                with _lock:
+                    if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
+                        continue
+                    _cache['evcc_redetect_ts'][lp] = now
+                _evcc_fix_vehicle(url, lp, [socket_vin],
+                                  f'switched socket shows {point.get("vehicleTitle")}, which is plugged in elsewhere')
             continue
         if not point.get('charging'):
             continue
@@ -216,6 +270,8 @@ def _check_evcc_loadpoints(vehicles):
             # this power (keeps heat pumps and other chargers out).
             here = _evs_charging_here(point, vehicles)
             if here:
+                planned.add(lp)
+            if here and _fix_confirmed(lp, ('empty', tuple(sorted(here))), now):
                 with _lock:
                     if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
                         continue
@@ -232,11 +288,17 @@ def _check_evcc_loadpoints(vehicles):
         here = _evs_charging_here(point, vehicles)
         if not here or vin in here:
             continue
+        planned.add(lp)
+        if not _fix_confirmed(lp, ('shown', vin, tuple(sorted(here))), now):
+            continue
         with _lock:
             if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
                 continue
             _cache['evcc_redetect_ts'][lp] = now
         _evcc_fix_vehicle(url, lp, here, f'shows {point.get("vehicleTitle") or vin} = {vin}, which charges elsewhere or not at all')
+    with _lock:
+        for lp in [k for k in _cache['fix_pending'] if k not in planned]:
+            del _cache['fix_pending'][lp]   # the reason went away – start over next time
 
 # ── Periodic full charge from PV (LFP balancing) ───────────────────────────────
 # Due every FULL_CHARGE_DAYS after the last recorded 100 %. Once it is due, the car is
@@ -630,7 +692,9 @@ _cache = {
     'sessions': {},     # inst -> {'energy_kwh': float, 'state': str}
     'evcc_redetect_ts': {},  # EVCC loadpoint -> time of the last vehicle re-detection
     'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
-    'soc_trend': {},    # EV instance -> [(time a SoC value first showed up, SoC)] while not charging
+    'soc_trend': {},
+    'station_owner': {},  # EVCS instance -> EV instance plugged into it (sticky, see _station_owners)
+    'fix_pending': {},    # loadpoint -> (planned fix, time first seen) – a fix must hold before it is made    # EV instance -> [(time a SoC value first showed up, SoC)] while not charging
     'evcc_live': (0.0, {}),   # (time, {'solar': {evcc vehicle: %}, 'limit': {evcc vehicle: %}, 'titles': {evcc vehicle: title}})
     'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
     'full_charge_info': {},  # VIN -> state of the periodic full charge for the status page
@@ -962,7 +1026,7 @@ def poll_vrm():
             bat      = _bat()
             opt_max  = _get_int('OPT_MAX', bat['opt_max'])
             vehicles = {}
-            owners   = _station_owners(by_instance)
+            owners   = _station_owners(by_instance, records)
 
             with _cfg_lock:
                 cfg = _load_cfg()
