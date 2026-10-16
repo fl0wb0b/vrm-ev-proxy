@@ -217,6 +217,7 @@ The bundled JPEGs in [`images/`](images/) are **AI-generated studio illustration
 | `GET` | `/api/1/vehicles/<VIN>/vehicle_data` | Tesla-style `response.response.charge_state`; HTTP 503 without data or when too old. |
 | `POST` | `/api/1/vehicles/<VIN>/command/<command>` | Acknowledged no-op, e.g. `wake_up`, `charge_start`, `set_charging_amps`. |
 | `GET` | `/api/health` | JSON status `ok`, `error` or `stale`, age, error, site ID and version; HTTP 503 for error/stale. |
+| `GET` | `/api/full_charge` | Full charge per car: state (`scheduled`, `active`, `night`, `unplugged`, `paused`, …), due day `due`, `days_left` (0 = today), kWh since the last 100 %, text as on the status page. For notifications, e.g. from Node-RED on the GX. |
 | `GET` | `/api/raw` | Cached raw VRM values per vehicle, including linked charging-station values. |
 | `GET` | `/img/<id>.jpg` | Bundled model image, if the ID is supported. |
 
