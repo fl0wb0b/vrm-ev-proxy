@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [Deutsch](README.md)
 
-Bringt den Fahrzeugstatus aus Victron VRM in evcc – für Automarken, die VRM anbindet (bisher nur mit Teslas getestet, siehe „Getestet mit“) – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus, wenn die Solarprognose es erlaubt.
+Bringt den Fahrzeugstatus aus Victron VRM in evcc – für Automarken, die VRM anbindet (bisher nur mit Teslas getestet, siehe „Getestet mit“) – und automatisiert zusätzlich regelmäßige Vollladungen für LFP-Akkus mit Sonnenstrom.
 
 ## Warum es dieses Projekt gibt
 
@@ -12,7 +12,7 @@ Bringt den Fahrzeugstatus aus Victron VRM in evcc – für Automarken, die VRM a
 
 Gebaut hat das ein Besitzer von LFP-Elektroautos mit Victron VRM und evcc. LFP-Akkus brauchen regelmäßige Vollladungen für das Balancing der Zellen durch das BMS und die Kalibrierung des Ladestands: Wegen der flachen Spannungskurve zählt das BMS Energie, und diese Schätzung driftet. Der UI-Hinweis im Code nennt grob **3–5 % in 3–4 Wochen oder 100–150 kWh**; das ist keine Messung des eigenen Akkus. Im Alltag lädt man meist nur bis etwa 80 %, um die Zeit bei hohem Ladestand zu begrenzen.
 
-Von Hand bedeutet das: letzte Vollladung merken, einen sonnigen Tag erwischen, das evcc-Limit auf 100 % setzen und später wieder zurückstellen. Der Proxy übernimmt diese Folge: 100 % je Fahrzeug erfassen, die nächste Vollladung fällig stellen, eine passende Solarprognose abwarten, das evcc-Limit vorübergehend anheben und nach Ladeende den Alltagswert wiederherstellen.
+Von Hand bedeutet das: letzte Vollladung merken, bei Sonne das evcc-Limit auf 100 % setzen, es stehen lassen, bis das Auto voll ist, und später wieder zurückstellen. Der Proxy übernimmt diese Folge: 100 % je Fahrzeug erfassen, die nächste Vollladung fällig stellen, bei Sonne das evcc-Limit anheben und bis 100 % stehen lassen und nach Ladeende den Alltagswert wiederherstellen.
 
 Das Ziel ist **zero-touch nach der Einrichtung**: wie gewohnt anstecken; evcc übernimmt das Überschussladen und der Proxy den Zeitpunkt für die Vollladung. Der Betreiber nutzt **14 Tage oder 190 kWh für einen 60-kWh-LFP-Akku**. Das sind einstellbare Werte, keine Standardwerte oder allgemeine Akkuempfehlung. Genügend Sonne und eine passende evcc-Konfiguration bleiben Voraussetzung. Beide Schwellen auf 0 deaktivieren die Vollladeautomatik; Fahrzeug-Neuerkennung und evcc-basierte Statusinformationen bleiben bei eingerichteter `EVCC_URL` aktiv.
 
@@ -39,7 +39,7 @@ Alle Screenshots verwenden **erfundene Demodaten**: VINs mit `VF1DEMO…`, Site-
 ## Funktionen
 
 - **Regelmäßige Vollladungen ohne Kalender:** Tage **oder** geladene kWh machen ein Fahrzeug fällig; ein viel gefahrenes Auto kann dadurch früher an die Reihe kommen.
-- **Fahrzeugerkennung nach schnellem Wechsel:** Tauscht man zwei Autos zwischen evcc-Abfragen, kann das alte am Ladepunkt stehen bleiben. Erkennt der Proxy die falsche Zuordnung während des Ladens, fordert er eine neue Erkennung an.
+- **Richtiges Auto am Ladepunkt:** Tauscht man zwei Autos zwischen evcc-Abfragen, kann das alte am Ladepunkt stehen bleiben. Der Proxy vergleicht die Ladeleistung der Ladepunkte mit der der Autos; passt genau ein Auto, setzt er es in evcc direkt, sonst fordert er eine neue Erkennung an. Eine Schalt-Steckdose (Schuko), die ein Auto zeigt, das laut VRM an der Victron-Station steckt oder unterwegs ist, bekommt das einzige andere Auto zu Hause. Lädt ein Auto am Schuko, meldet VRM oft „nicht laden“ (Tesla: ChargingState 0) – steigt der SoC zu Hause in mindestens zwei Schritten um 2 % innerhalb einer Stunde, gilt es trotzdem als ladend; die Leistung wird aus dem Anstieg geschätzt.
 - **Fahrzeugstatus aus VRM in evcc, markenunabhängig:** VRM bindet die Hersteller an; der Proxy stellt deren Daten im Tesla-Format bereit, sodass evcc sie über das Template `tesla-ble` abruft. Es entsteht keine zweite Verbindung zum Fahrzeug.
 - **Status für Handy oder Wandtablet:** Teilaktualisierungen ersetzen nur geänderte Seitenbereiche; auch die Detailwerte laufen live mit. Die Ladeanimation und der geöffnete Bridge-Systembereich bleiben erhalten. Nach 30 Minuten oder einer unerwarteten Strukturänderung wird vollständig neu geladen.
 - **Antworten beim Laden:** „Ladeziel 80 % · ca. HH:MM“ und der Solaranteil der Sitzung zeigen, wann das Laden voraussichtlich fertig ist und wie viel davon aus Sonne stammt. Die Endzeit ist aus der aktuellen Leistung geschätzt. Die Wochenzeile mit kWh/Solar stammt aus evcc-Ladesitzungen.
@@ -50,10 +50,10 @@ Alle Screenshots verwenden **erfundene Demodaten**: VINs mit `VF1DEMO…`, Site-
 
 1. **Gemeldete 100 % selbst erfassen.** Der Proxy speichert je VIN den ersten beobachteten Sprung auf 100 %, unabhängig vom Ladeort. Bleibt das Auto bei 100 % stehen, wandert das Datum nicht weiter. Der SoC wird abgeschnitten: 99,6 % bleiben 99 %. Beim Start kann der Proxy den Zeitpunkt der letzten Vollladung aus dem gespeicherten stündlichen SoC-Verlauf ergänzen oder korrigieren, insbesondere wenn ältere Versionen ihn während einer 100-%-Phase weitergeschoben haben.
 2. **Nach Zeit oder Energie fällig werden.** `FULL_CHARGE_DAYS` zählt Kalendertage seit der letzten Vollladung; `FULL_CHARGE_KWH` zählt seitdem geladene Energie. Eine erreichte Schwelle genügt. Die Energie stammt aus evcc-Sitzungen plus beobachteten SoC-Anstiegen × Kapazität, während das Auto außerhalb der Anlage Laden meldet. So zählt neben der Zeit auch die Nutzung. Ohne erfasste Vollladung dient die erste Prüfung als Zeitreferenz.
-3. **Einen passenden Sonnentag abwarten.** Höchstens alle fünf Minuten prüft der Proxy die evcc-Prognose und einen verbundenen Ladepunkt mit dem zugeordneten Fahrzeug. Er zieht die Hausgrundlast ab (Standard 1500 W), begrenzt den Überschuss auf die Ladepunktleistung und vertraut 80 % des Rests. Die fehlende Akkuenergie wird mit 90 % Ladeeffizienz berechnet. Die Restprognose muss sie decken; außerdem muss der **aktuelle Prognose-Zeitschritt** über der Grundlast liegen. Diese Tageslichtprüfung misst weder Sonnenschein noch tatsächliche PV-Leistung.
-4. **Nur das evcc-Fahrzeuglimit anheben.** Der Proxy merkt sich das bisherige Limit und setzt es auf 100 %. Er erstellt keinen Plan und verändert weder Lademodus noch Tarifeinstellung oder Strom. **evcc muss für Überschussladen im Modus `pv` eingerichtet sein**, ohne Pläne oder Smart-Cost-Einstellungen, die Netzladen erlauben; die Energiequelle bestimmt weiterhin evcc. Das Limit im Auto muss 100 % bereits erlauben.
+3. **Bei Sonne starten.** Höchstens alle fünf Minuten prüft der Proxy einen verbundenen Ladepunkt mit dem zugeordneten Fahrzeug. Ist die Vollladung fällig und misst evcc mehr PV-Leistung als `FULL_CHARGE_BASE_LOAD` (Standard 1500 W, etwa die Grundlast), startet sie. Fehlt der Messwert, gilt der aktuelle Zeitschritt der evcc-Solarprognose. Es wird **nicht** mehr auf einen Tag gewartet, dessen Prognose die ganze Lücke deckt – ein täglich genutztes Auto startet jeden Tag weit unter 100 % und käme so nie an.
+4. **Nur das evcc-Fahrzeuglimit anheben.** Der Proxy merkt sich das bisherige Limit und setzt es auf 100 %. Steht am Ladepunkt noch ein Limit unter 100 % (etwa von einer früheren Rücksetzung), setzt er auch dieses auf 100 %. Er erstellt keinen Plan und verändert weder Lademodus noch Tarifeinstellung oder Strom. **evcc muss für Überschussladen im Modus `smart` (vor evcc 0.316: `pv`) eingerichtet sein**, ohne Pläne, „Immer laden“ oder Smart-Cost-Limit, die Netzladen erlauben; die Energiequelle bestimmt weiterhin evcc. Das Limit im Auto muss 100 % bereits erlauben.
 5. **Das Auto fertig balancieren lassen.** Manche Autos melden 100 %, bevor das Nachladen abgeschlossen ist (zum Beispiel Tesla). Der Proxy wartet, bis VRM 100 % und **30 Minuten** lang kein Laden des Fahrzeugs meldet; eine Lademeldung setzt den Timer zurück. Dann stellt er den gespeicherten Wert am evcc-Fahrzeug **und**, falls noch verbunden, am Ladepunkt wieder her. Beide Schreibzugriffe sind nötig: evcc reicht ein gesenktes Fahrzeuglimit sonst nicht an einen bereits verbundenen Ladepunkt weiter.
-6. **Den Versuch passend beenden.** Das gespeicherte Limit kommt auch zurück, wenn die Funktion deaktiviert wird, ein neuer Tag beginnt oder unter 100 % weniger als 0,5 kWh prognostizierter Restüberschuss für heute übrig ist. Wurden während des Versuchs 100 % erfasst, beenden auch Abstecken oder Fahren den Versuch. **Abstecken vor 100 % bricht ihn nicht sofort ab; eine vorbeiziehende Wolke ebenfalls nicht.** Eine unvollständige Vollladung bleibt fällig und kann an einem passenden Sonnentag erneut versucht werden.
+6. **Das Limit bis 100 % stehen lassen.** Unter 100 % bleibt das Limit über Nacht und über mehrere Tage, auch wenn das Auto zwischendurch wegfährt – an jedem Sonnentag geht es weiter. Zurück kommt das gespeicherte Limit, wenn die Funktion deaktiviert wird oder 100 % erfasst und das Auto danach abgesteckt oder gefahren wurde. **Ändert jemand während der Vollladung das Limit in evcc** (Fahrzeug oder Ladepunkt), gilt diese Änderung: Der Proxy lässt sie stehen und versucht es erst am nächsten Tag wieder.
 
 Implementiert in [`poll_vrm` und `_full_charge_pv`](app.py). Gespeichert wird ein evcc-Fahrzeuglimit von **1–99 %**, kein separates vorheriges Ladepunktlimit. Vor dem Aktivieren ein Alltagslimit wie 80 % am evcc-Fahrzeug einstellen.
 
@@ -71,14 +71,14 @@ Einmal einrichten; danach muss niemand mehr fragen „wann habe ich zuletzt auf 
 
 - [ ] Im Auto: Ladelimit so setzen, dass **100 %** erlaubt sind. Der Proxy ändert es nie.
 - [ ] In evcc: **Tageslimit des Fahrzeugs** (z. B. 80 %) setzen und den Ladepunkt im **`pv`-Modus** ohne Pläne oder Netzladung über Smart-Cost betreiben.
-- [ ] In evcc: die Solarprognose aktivieren; der Proxy verlässt sich darauf.
+- [ ] In evcc: PV-Leistung messen (Standard bei jeder Anlage); eine Solarprognose dient nur als Ersatz, wenn der Messwert fehlt.
 - [ ] In den Proxy-Einstellungen: `FULL_CHARGE_DAYS` und `FULL_CHARGE_KWH` (eines von beiden macht eine Vollladung fällig) sowie die evcc-URL eintragen.
 - [ ] Statusseite prüfen: Jedes Auto zeigt unter „Details & Verlauf“ die letzte Vollladung und wann die nächste fällig ist.
 
 ### Wo man es sieht
 
 - **Statusseite, Fahrzeugkarte:** Eine laufende Vollladung erscheint direkt unter dem SoC: „Vollladung mit PV läuft seit … – EVCC-Ladeziel 100 %.“ Bei Ruhe steht die letzte Vollladung zusätzlich oben.
-- **Statusseite, Details & Verlauf:** Letzte Vollladung als „Heute“, „Gestern“ oder mit älterem Datum sowie anstehende oder verhinderte Vollladung: „Nächste Vollladung mit PV fällig: …“, „Vollladung fällig – heute reicht die PV nicht (Prognose … kWh, nötig … kWh).“, „Vollladung: Das Auto hängt an einem Ladepunkt, den der Proxy nicht steuern soll.“ oder „Vollladung fällig – EVCC liefert keine Solarprognose …“.
+- **Statusseite, Details & Verlauf:** Letzte Vollladung als „Heute“, „Gestern“ oder mit älterem Datum sowie anstehende oder verhinderte Vollladung: „Nächste Vollladung mit PV fällig: …“, „Vollladung fällig – startet, sobald die Sonne scheint.“, „Vollladung fällig – bis morgen pausiert, das Ladeziel wurde in EVCC geändert.“, „Vollladung: Das Auto hängt an einem Ladepunkt, den der Proxy nicht steuern soll.“ oder „Vollladung fällig – EVCC meldet keine PV-Leistung …“.
 - **Log:** Aktivierung, Rückstellung und evcc-Aufruffehler werden protokolliert; den jeweiligen Wartegrund zeigt die Statusseite. Beispiele:
 
 ```text
@@ -94,8 +94,9 @@ Benötigt `EVCC_URL`, z. B. `http://evcc.example:7070`. Ladepunktnummern `<n>` b
 |---|---|---|
 | Zustand lesen | `GET /api/state` | Erkennungsprüfung während des Ladens; Vollladeprüfung; Statusanzeige (20 s Cache für die Anzeige). Zusätzlich beim Rendern der Einstellungsseite, auch nach Speichern oder Validierungsfehlern: Scan der Fahrzeuge und Ladepunkte ohne Statuscache; Scanfehler erscheinen dort. |
 | Ladesitzungen lesen | `GET /api/sessions` | Wochenstatistik und kWh-Schwelle; 15 Minuten zwischengespeichert. |
-| Fahrzeugerkennung anfordern | `PATCH /api/loadpoints/<n>/vehicle` | Ausgewählter ladender Ladepunkt zeigt ein eindeutig zugeordnetes, hier getrenntes Fahrzeug oder kein Fahrzeug bei passender Ladeleistung; keine laufende Erkennung und mindestens ein VRM-Fahrzeug im Ladezustand; höchstens einmal je fünf Minuten und Ladepunkt. |
-| Vollladung erlauben | `POST /api/vehicles/<name>/limitsoc/100` | Fahrzeug fällig, SoC unter 100 %, an ausgewähltem Ladepunkt verbunden und Prognoseprüfungen bestanden; POST nur bei evcc-Fahrzeuglimit ungleich 100 %. |
+| Fahrzeug setzen | `POST /api/loadpoints/<n>/vehicle/<name>` | Ausgewählter Ladepunkt: genau ein Auto lädt mit passender Leistung, aber evcc zeigt ein anderes oder keins – oder eine Schalt-Steckdose zeigt ein Auto, das an der Victron-Station steckt oder unterwegs ist, und genau ein anderes ist zu Hause; evcc-Fahrzeug bekannt; höchstens einmal je fünf Minuten und Ladepunkt. |
+| Fahrzeugerkennung anfordern | `PATCH /api/loadpoints/<n>/vehicle` | Wie „Fahrzeug setzen“, aber mehrere Autos passen oder das evcc-Fahrzeug ist nicht bekannt. |
+| Vollladung erlauben | `POST /api/vehicles/<name>/limitsoc/100` | Fahrzeug fällig, SoC unter 100 %, an ausgewähltem Ladepunkt verbunden, PV-Leistung über `FULL_CHARGE_BASE_LOAD` und nicht für heute pausiert; POST nur bei evcc-Fahrzeuglimit ungleich 100 %. Dazu `POST /api/loadpoints/<n>/limitsoc/100`, wenn dort ein Limit unter 100 % steht. |
 | Fahrzeuglimit zurücksetzen | `POST /api/vehicles/<name>/limitsoc/<old>` | Bei Abschluss oder den genannten Endbedingungen, falls ein Alltagslimit gespeichert wurde. |
 | Ladepunktlimit zurücksetzen | `POST /api/loadpoints/<n>/limitsoc/<old>` | Bei derselben Rücksetzung, falls das zugeordnete Auto dort noch verbunden ist. |
 
@@ -190,7 +191,7 @@ Nicht leere Werte in `/config/settings.json` haben Vorrang vor Umgebungsvariable
 | `FULL_REMINDER_DAYS` | `28` bei LFP; nur UI-Erinnerung, getrennt von der Automatik. |
 | `FULL_CHARGE_DAYS` | `0` (aus); 0–60 Kalendertage. |
 | `FULL_CHARGE_KWH` | `0` (aus); 0–2000 geladene kWh. Jede aktive Schwelle kann das Fahrzeug fällig machen. |
-| `FULL_CHARGE_BASE_LOAD` | `1500` W; Abzug von der Solarprognose, einstellbar 0–20000 W. |
+| `FULL_CHARGE_BASE_LOAD` | `1500` W; PV-Leistung, ab der eine fällige Vollladung startet, einstellbar 0–20000 W. |
 | `EVCC_URL` | Leer: evcc-Anbindung aus. Beispiel: `http://evcc.example:7070`. |
 | `EVCC_LOADPOINTS` | Leer: alle Ladepunkte. Sonst Nummern ab 1, kommasepariert ohne Leerzeichen, z. B. `1,3`. Beschränkt Neuerkennung und den Start von Vollladungen. In der UI muss mindestens ein Ladepunkt ausgewählt bleiben. |
 | `LANGUAGE` | `auto` (Browsersprache), `en` oder `de`; nur die Oberfläche. |
@@ -231,23 +232,23 @@ Die Oberfläche warnt nach `max(180 s, 3 × POLL_INTERVAL)` ohne erfolgreichen V
 - **evcc-Verbindungsfehler:** `url: http://proxy.example` und `port: 8080` verwenden, ohne den Port in der URL zu wiederholen.
 - **Falsches Fahrzeug:** VIN mit der Proxy-Anzeige abgleichen. Groß-/Kleinschreibung spielt keine Rolle; unbekannte VINs liefern das erste Fahrzeug. Bei mehreren Fahrzeugen wird je unbekannter VIN einmal gewarnt. Mehrdeutige Treffer lösen keine Neuerkennung aus.
 - **Keine evcc-Statistik oder Automatik:** Ist `EVCC_URL` gesetzt, aber falsch (nicht erreichbar, falscher Port oder Pfad, Anmeldung nötig, keine evcc-Antwort), zeigt die Statusseite oben eine rote Fehlermeldung mit dem Grund. Außerdem: `EVCC_URL`, Erreichbarkeit, VIN-Zuordnung (Einstellungen → Fahrzeuge → Fahrzeug in EVCC) prüfen. Der Client sendet keine evcc-Anmeldedaten; eine API mit Authentifizierung schlägt fehl. Im Log nach `[EVCC]`, `[LIVE]` oder `[FULL]` suchen.
-- **Vollladung bleibt fällig:** Fahrzeugzuordnung, Verbindung, ausgewählten Ladepunkt und ausreichende evcc-Solarprognose prüfen. Fehlende Zuordnung, ausgeschlossener Ladepunkt und fehlende Prognose werden unter „Details & Verlauf“ getrennt angezeigt. Im Winter kann das dauern. Das Auto muss selbst 100 % erlauben und evcc PV-Überschussladen nutzen.
+- **Vollladung bleibt fällig:** Fahrzeugzuordnung, Verbindung und ausgewählten Ladepunkt prüfen. Fehlende Zuordnung, ausgeschlossener Ladepunkt und fehlende PV-Leistung werden unter „Details & Verlauf“ getrennt angezeigt. Im Winter kann das dauern. Das Auto muss selbst 100 % erlauben und evcc PV-Überschussladen nutzen.
 - **Limit kommt nicht zurück:** 30 Minuten nach Ladeende abwarten, evcc-API-Fehler prüfen und `EVCC_URL` eingerichtet lassen. Nur ein gespeichertes Alltagslimit von 1–99 % kann wiederhergestellt werden.
 
 Weitere Implementierungshinweise: [BUGS.md](BUGS.md).
 
 ## Getestet mit – und was darüber hinaus nur angenommen ist
 
-Entwickelt und getestet wurde auf **einer** Installation: Victron EV Charging Station, zwei Teslas über VRM, evcc mit in der Oberfläche angelegten Fahrzeugen, aktiver Solarprognose, ohne evcc-Anmeldung. Dass es dort läuft, heißt nicht, dass es überall läuft. Nicht geprüft sind:
+Entwickelt und getestet wurde auf **einer** Installation: Victron EV Charging Station, zwei Teslas über VRM, evcc mit in der Oberfläche angelegten Fahrzeugen, einer Schuko-Schaltsteckdose als zweitem Ladepunkt, ohne evcc-Anmeldung. Dass es dort läuft, heißt nicht, dass es überall läuft. Nicht geprüft sind:
 
 - **Andere Marken in VRM.** Der Proxy liest das VRM-Gerät „Electric Vehicle“ (`/Soc`, Reichweite, `/ChargingState`, optional `/VIN`, `/BatteryCapacity`). Liefert VRM bei einer Marke andere oder weniger Felder, fehlen Werte oder die Zuordnung. Fehlt eine Fahrzeugkennung, verwendet der Proxy eine Ersatzkennung. Die Zuordnung zum evcc-Fahrzeug erfolgt über Reichweite und gegebenenfalls Ladestand beim Lernen oder durch Handauswahl in den Einstellungen.
 - **Andere Wallboxen.** Die Stationslogik (`/Mgmt/Connection`, Status, Sitzungsenergie) gilt nur für Victron-Ladestationen. Das wirksame Ladeziel kann aus evcc kommen. Ladeleistung und daraus berechnete Endzeit benötigen verwertbare VRM-Leistungswerte beziehungsweise Spannung, Strom und Phasen.
 - **Fahrzeuge aus der `evcc.yaml`.** Bei Fahrzeugen aus der Datei hilft das Lernen (setzt voraus, dass das evcc-Fahrzeug Reichweite und Ladestand **vom Proxy** bezieht, Template `tesla-ble`) oder die **Handauswahl** je Auto in den Einstellungen.
-- **Andere evcc-Versionen.** Gebraucht werden `/api/state` mit Ladepunkten, Fahrzeug-Limit, Solarprognose-Zeitreihe und die Schreibaufrufe unter `/api/vehicles/<name>/limitsoc/…`. Eine Mindestversion ist nicht bestimmt.
+- **Andere evcc-Versionen.** Gebraucht werden `/api/state` mit Ladepunkten, Fahrzeug-Limit und PV-Leistung sowie die Schreibaufrufe unter `/api/vehicles/<name>/limitsoc/…` und `/api/loadpoints/<n>/…`. Eine Mindestversion ist nicht bestimmt.
 - **Gleiche Fahrzeugtitel.** evcc-Sitzungen werden über den Titel zugeordnet; zwei Autos mit gleichem Titel vermischen ihre kWh.
 - **Akkukapazität und Akkutyp.** Für Vollladeplanung und Status-Endzeit gilt: je Fahrzeug > `CAPACITY` > VRM > evcc-Fahrzeug > 60 kWh; API-Endzeit, Zyklen und Auswärtsenergie verwenden nur die ersten drei Quellen. Bei verschieden großen Autos je Auto eintragen. Den Akkutyp (LFP/NMC) je Fahrzeug einstellen oder die globale Einstellung übernehmen; die Zellchemie wird nicht automatisch erkannt. Weicht der Fahrzeugtyp vom globalen Typ ab, gelten seine voreingestellten SoC-Grenzen.
 
-Fehlende Zuordnung, ausgeschlossener Ladepunkt und fehlende Solarprognose werden getrennt angezeigt. Ist evcc falsch eingetragen, zeigt die Statusseite einen Fehler.
+Fehlende Zuordnung, ausgeschlossener Ladepunkt und fehlende PV-Leistung werden getrennt angezeigt. Ist evcc falsch eingetragen, zeigt die Statusseite einen Fehler.
 
 ## Grenzen
 
@@ -255,7 +256,7 @@ Fehlende Zuordnung, ausgeschlossener Ladepunkt und fehlende Solarprognose werden
 - **Keine Änderungen an Modus, Plänen, Tarif oder Strom:** Ein höheres Limit wählt nicht selbst Solarstrom aus. Bestehende evcc-Einstellungen bestimmen, ob Netzstrom genutzt werden kann; der Proxy garantiert keine netzstromfreie Ladung.
 - **evcc für VRM-Daten optional, für evcc-Funktionen erforderlich:** Vollladeautomatik, Neuerkennung, wirksame Ladeziele und Solar-/Sitzungsstatistik benötigen `EVCC_URL`. evcc-basierte Solar- und Wochenstatistiken brauchen eine manuelle oder gelernte Fahrzeugzuordnung; SoC-Verlauf und Akku-Erfassung sind davon unabhängig.
 - **VRM-Daten werden abgefragt, sind nicht live:** Standardintervall 60 Sekunden, bei Fehlern längere Wartezeiten. Der Fahrzeugkontakt kann noch älter sein. Eine 100-%-Meldung und ein Timer beweisen kein abgeschlossenes Zellbalancing.
-- **Vollladungen hängen von Sonne ab:** Eine zu schwache oder fehlende Prognose lässt das Auto fällig bleiben. Es wird kein Netzstrom-Ersatzplan angelegt.
+- **Vollladungen hängen von Sonne ab:** Ohne Sonnenstrom am Ladepunkt bleibt das Auto bei Limit 100 % stehen, bis es wieder Sonne gibt. Es wird kein Netzstrom-Ersatzplan angelegt.
 - **Erfassung beruht auf Beobachtung:** Nicht beobachtete Ladungen/SoC-Änderungen können fehlen; auswärts geladene Energie und Zyklen sind Schätzungen. evcc-Sitzungen werden nach Fahrzeugtitel zugeordnet; die Wochenzeile zählt im Zeitraum begonnene Sitzungen.
 - **Keine HTTP-Authentifizierung:** Wer den Server erreichen kann, kann Status/Rohdaten ansehen und Einstellungen ändern. Das Einstellungsformular liefert den vollständigen VRM-Token nicht zurück.
 
