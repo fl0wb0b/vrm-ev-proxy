@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.1"
+VERSION    = "2.20.2"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -212,6 +212,29 @@ def _fix_confirmed(lp, plan, now):
             return False
         return now - pend[1] >= EVCC_FIX_CONFIRM
 
+def _station_car(point, vehicles, points):
+    """VIN of the car to put on the loadpoint of the Victron station when EVCC shows the
+    wrong one there – else None.
+
+    The station's loadpoint is the only real charger in EVCC (not a switched socket, not
+    a heater). Without power flowing (car full) the power check can't tell who is there
+    (16.10.: Model 3 shown at the wallbox, the full Model Y plugged in). Only on clear
+    evidence: the shown car charges somewhere else (it reports charging, the station
+    delivers nothing to it) or is away, and VRM puts exactly one other car at the station.
+    """
+    chargers = [p for p in points if not p.get('chargerFeatureSwitchDevice') and not p.get('chargerFeatureHeating')]
+    if len(chargers) != 1 or chargers[0] is not point or not point.get('connected') or not point.get('vehicleName'):
+        return None
+    vin = _match_vin(point, vehicles)
+    if not vin:
+        return None
+    shown = vehicles[vin]
+    elsewhere = shown['data']['charging_state'] == 'Charging' and not _charging_at_station(shown)
+    if not (elsewhere or _num(shown['raw']['ev'].get('/AtSite'), 1) == 0):
+        return None
+    at_station = [v for v, veh in vehicles.items() if v != vin and _plugged_at_station(veh)]
+    return at_station[0] if len(at_station) == 1 else None
+
 def _evcc_fix_vehicle(url, lp, vins, reason):
     """Put the car charging on loadpoint <lp> there. With exactly one candidate whose EVCC
     vehicle is known it is set directly – EVCC's own detection takes any car that reports
@@ -261,6 +284,17 @@ def _check_evcc_loadpoints(vehicles):
                     _cache['evcc_redetect_ts'][lp] = now
                 _evcc_fix_vehicle(url, lp, [socket_vin],
                                   f'switched socket shows {point.get("vehicleTitle")}, which is plugged in elsewhere')
+            continue
+        station_vin = _station_car(point, vehicles, state.get('loadpoints') or [])
+        if station_vin:
+            planned.add(lp)
+            if _fix_confirmed(lp, ('station', station_vin), now):
+                with _lock:
+                    if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
+                        continue
+                    _cache['evcc_redetect_ts'][lp] = now
+                _evcc_fix_vehicle(url, lp, [station_vin],
+                                  f'station loadpoint shows {point.get("vehicleTitle")}, which charges elsewhere or is away')
             continue
         if not point.get('charging'):
             continue

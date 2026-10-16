@@ -20,6 +20,7 @@ Status: ✅ behoben · ⚠️ teilweise / mit Annahme · ⏭️ bewusst nicht ge
 | E8 | Schuko-Ladepunkt meldet nie „abgesteckt“ → ein einmal falsch zugeordnetes, volles Auto bleibt dort | evcc schaltet die Steckdose nie ein, das richtige Auto lädt nicht | ✅ v2.19.0: steckt das gezeigte Auto laut VRM an der Victron-Station oder ist unterwegs, kommt das einzige andere Auto zu Hause dorthin |
 | E9 | Laden an der Schuko-Steckdose sieht VRM nicht (Tesla: ChargingState 0) | Proxy meldet evcc „nicht angesteckt“, evcc erkennt das Auto am Schuko nie | ✅ v2.19.0: steigt der SoC zu Hause in ≥ 2 Schritten um ≥ 2 % binnen 1 h, gilt das Auto als ladend (Leistung aus dem Anstieg) |
 | E10 | Melden beide Autos „lädt“ (Y an der Station, M3 am Schuko), entschied der jüngste Fahrzeugkontakt, wem die Station gehört – das wechselte bei jeder Abfrage | Stationsleistung sprang zwischen den Autos, v2.19/2.20 tauschten die Fahrzeuge in evcc alle 5 min (16.10., 19× in 2 h) | ✅ v2.20.1: Station-Besitzer nach Phasen/Leistung und bleibt stehen; Korrekturen erst, wenn sie 90 s gleich bleiben; Schuko-Regel nur bei klarem Beleg |
+| E11 | Wallbox zeigt in evcc das falsche Auto, solange dort keine Leistung fließt (Auto voll) | Korrektur nur über Leistung möglich → falsches Auto bleibt bis zum nächsten Abstecken (16.10. nach dem Flattern: M3 an der Wallbox, Y voll eingesteckt) | ✅ v2.20.2: lädt das gezeigte Auto laut VRM woanders oder ist unterwegs und steckt genau ein anderes an der Station, kommt dieses an den Stations-Ladepunkt |
 
 ## Victron-Datenmodell (`com.victronenergy.ev`)
 
