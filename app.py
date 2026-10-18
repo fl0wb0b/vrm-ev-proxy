@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.2"
+VERSION    = "2.20.3"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -2418,7 +2418,12 @@ class Handler(BaseHTTPRequestHandler):
 
             veh = _find_vehicle(vehicles, vin)
 
-            self._json({'response': {'response': {'charge_state': veh['data']}}},
+            body = {'charge_state': veh['data']}
+            # EVCC's tesla-ble template reads the odometer from drive_state, in miles
+            # (scale 1.60934); without it EVCC logs "odometer not available" and shows 0.
+            if veh.get('odometer'):
+                body['drive_state'] = {'odometer': round(veh['odometer'] / 1.60934, 1)}
+            self._json({'response': {'response': body}},
                        headers={'X-Data-Age-Seconds': str(age)})
         elif re.fullmatch(r'/img/([a-z0-9-]+)\.jpg', path) and re.fullmatch(r'/img/([a-z0-9-]+)\.jpg', path).group(1) in LOCAL_IMAGES:
             try:
