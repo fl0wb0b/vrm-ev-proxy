@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.3"
+VERSION    = "2.20.4"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -2418,7 +2418,9 @@ class Handler(BaseHTTPRequestHandler):
 
             veh = _find_vehicle(vehicles, vin)
 
-            body = {'charge_state': veh['data']}
+            # EVCC's tesla-ble template also reads climate_state.is_preconditioning (climater).
+            # VRM has no climate data; without the field EVCC logs "ParseBool: parsing <nil>".
+            body = {'charge_state': veh['data'], 'climate_state': {'is_preconditioning': False}}
             # EVCC's tesla-ble template reads the odometer from drive_state, in miles
             # (scale 1.60934); without it EVCC logs "odometer not available" and shows 0.
             if veh.get('odometer'):
