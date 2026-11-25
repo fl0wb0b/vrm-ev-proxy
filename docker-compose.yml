@@ -8,6 +8,9 @@ services:
     volumes:
       - config:/config          # persists settings changed via web UI
     environment:
+      - DATA_SOURCE=${DATA_SOURCE:-vrm}   # vrm or ble (Tesla over Bluetooth via TeslaBleHttpProxy)
+      - BLE_URL=${BLE_URL:-}
+      - BLE_VINS=${BLE_VINS:-}
       - VRM_TOKEN=${VRM_TOKEN}
       - VRM_SITE_ID=${VRM_SITE_ID}
       - POLL_INTERVAL=${POLL_INTERVAL:-60}

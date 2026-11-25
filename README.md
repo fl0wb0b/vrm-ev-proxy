@@ -180,8 +180,11 @@ Nicht leere Werte in `/config/settings.json` haben Vorrang vor Umgebungsvariable
 
 | Variable | Standard / Bedeutung |
 |---|---|
-| `VRM_TOKEN` | Erforderlicher VRM-API-Token. |
-| `VRM_SITE_ID` | Erforderliche numerische Installations-ID. |
+| `DATA_SOURCE` | `vrm` (Standard) oder `ble`. Mit `ble` liest der Proxy die Autos per Bluetooth über einen [TeslaBleHttpProxy](https://github.com/wimaha/TeslaBleHttpProxy) statt über VRM. |
+| `BLE_URL` | Nur bei `ble`: Adresse des TeslaBleHttpProxy, z. B. `http://192.168.1.50:8080`. |
+| `BLE_VINS` | Nur bei `ble`: VINs der Autos, kommasepariert. Jede VIN braucht einen im Auto angelernten Schlüssel. |
+| `VRM_TOKEN` | VRM-API-Token, erforderlich bei `DATA_SOURCE=vrm`. |
+| `VRM_SITE_ID` | Numerische Installations-ID, erforderlich bei `DATA_SOURCE=vrm`. |
 | `POLL_INTERVAL` | `60` Sekunden; UI-Bereich 10–3600. |
 | `PORT` | `8080`; nach Änderung neu starten. |
 | `TZ` | `Europe/Berlin` in Compose; Container-Zeitzone, keine UI-Einstellung. |
