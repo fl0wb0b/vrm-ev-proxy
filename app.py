@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.5"
+VERSION    = "2.20.6"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -75,7 +75,7 @@ def _connection(ev):
 def _evcs_instance(connection):
     return int(_num(str(connection).split(':')[-1], -1))
 
-def _station_owners(by_instance, records=None):
+def _station_owners(by_instance, records=None, frozen=None):
     """Map EVCS instance -> EV instance that is actually plugged into it.
 
     VRM keeps /Mgmt/Connection of a car that has left, so several EVs can point
@@ -86,6 +86,9 @@ def _station_owners(by_instance, records=None):
     multi-phase power – and else the current owner stays. Only then the most
     recently seen one (/LastUpdated/EvContact) – that alone flipped the owner on
     every poll and with it which car got the station's power.
+
+    A car whose VRM data stand still (_frozen) claims nothing: its charging and its
+    phases are from whenever VRM last reached it.
     """
     with _lock:
         previous = dict(_cache['station_owner'])
@@ -94,7 +97,7 @@ def _station_owners(by_instance, records=None):
         station = _evcs_instance(_connection(ev))
         if station < 0 or _num(ev.get('/AtSite'), 1) == 0:
             continue
-        code   = int(_num(ev.get('/ChargingState'), 0))
+        code   = 0 if (frozen or {}).get(inst) else int(_num(ev.get('/ChargingState'), 0))
         active = code not in (0, 1, 255)
         seen   = _num(ev.get('/LastUpdated/EvContact') or ev.get('LastUpdated/EvContact'), 0)
         fit    = 0
@@ -103,7 +106,7 @@ def _station_owners(by_instance, records=None):
             if evcs:
                 live = sum(1 for k in ('/Ac/L1/Power', '/Ac/L2/Power', '/Ac/L3/Power')
                            if _num(evcs.get(k), 0) > 100)
-                phases = int(_num(ev.get('/Ac/NumberOfPhases'), 0))
+                phases = 0 if (frozen or {}).get(inst) else int(_num(ev.get('/Ac/NumberOfPhases'), 0))
                 if code == 3 and _num(evcs.get('/Ac/Power'), 0) < 100:
                     fit = -1          # charges, but the station delivers nothing: it's elsewhere
                 elif live >= 2 and phases:
@@ -116,6 +119,27 @@ def _station_owners(by_instance, records=None):
     with _lock:
         _cache['station_owner'].update(owners)
     return owners
+
+def _frozen(inst, ev, now):
+    """True if VRM's data of this car stand still: the car itself reports charging, but
+    its SoC hasn't moved for EV_FROZEN_CHARGING. A charging car gains about 2 %/h even on
+    a Schuko socket. 25.11.: VRM reported the Model 3 'charging 2136 W, 36 %, at home'
+    for 17 h while it was on the road with 28 % – VRM no longer reached the car."""
+    soc  = _num(ev.get('/Soc'), -1)
+    code = int(_num(ev.get('/ChargingState'), 0))
+    with _lock:
+        seen = _cache['soc_since'].get(inst)
+        if not seen or seen[0] != soc or code != 3:
+            _cache['soc_since'][inst] = (soc, now)
+            seen = (soc, now)
+    stale = code == 3 and 0 <= soc < 99 and now - seen[1] >= EV_FROZEN_CHARGING
+    with _lock:
+        was = _cache['frozen'].get(inst, False)
+        _cache['frozen'][inst] = stale
+    if stale != was:
+        print(f'[VRM] EV inst={inst}: data ' + ('frozen – reports charging, SoC stuck at '
+              f'{soc:g} % for {int((now - seen[1]) / 60)} min' if stale else 'moving again'), flush=True)
+    return stale
 
 def _evcc_redetect(url, lp, reason):
     """Ask EVCC to identify the vehicle on loadpoint <lp> (1-based) again."""
@@ -165,7 +189,7 @@ def _evs_charging_here(point, vehicles):
     lp_w = _num(point.get('chargePower'), 0)
     return [vin for vin, v in vehicles.items()
             if v['data']['charging_state'] == 'Charging' and v['power_w'] > 0
-            and not _station_guess(v)
+            and not _station_guess(v) and not v.get('stale')
             and abs(v['power_w'] - lp_w) <= EVCC_POWER_TOLERANCE * max(lp_w, 1)]
 
 def _plugged_at_station(veh):
@@ -218,7 +242,7 @@ def _socket_car(point, vehicles, points=()):
             or _on_real_charger(point.get('vehicleName'), points)):
         return None
     cfg = _load_cfg()
-    others = [v for v, veh in vehicles.items() if v != vin
+    others = [v for v, veh in vehicles.items() if v != vin and not veh.get('stale')
               and _num(veh['raw']['ev'].get('/AtSite'), 1) == 1 and not _plugged_at_station(veh)
               and not _on_real_charger(_evcc_name(cfg, v), points)]
     return others[0] if len(others) == 1 else None
@@ -261,7 +285,7 @@ def _station_car(point, vehicles, points):
                  and _socket_charging(points) is not False)
     if not (elsewhere or _num(shown['raw']['ev'].get('/AtSite'), 1) == 0):
         return None
-    at_station = [v for v, veh in vehicles.items() if v != vin and _plugged_at_station(veh)]
+    at_station = [v for v, veh in vehicles.items() if v != vin and not veh.get('stale') and _plugged_at_station(veh)]
     return at_station[0] if len(at_station) == 1 else None
 
 def _evcc_fix_vehicle(url, lp, vins, reason):
@@ -790,6 +814,8 @@ _cache = {
     'evcs_status': {},  # EVCS instance -> (/Status, time it took that value)
     'soc_trend': {},
     'station_owner': {},  # EVCS instance -> EV instance plugged into it (sticky, see _station_owners)
+    'soc_since': {},      # EV instance -> (SoC, time it took that value while charging) – see _frozen
+    'frozen': {},         # EV instance -> VRM data stand still (see _frozen)
     'fix_pending': {},    # loadpoint -> (planned fix, time first seen) – a fix must hold before it is made    # EV instance -> [(time a SoC value first showed up, SoC)] while not charging
     'evcc_live': (0.0, {}),   # (time, {'solar': {evcc vehicle: %}, 'limit': {evcc vehicle: %}, 'titles': {evcc vehicle: title}})
     'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
@@ -800,6 +826,7 @@ EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoin
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
 EVCC_POWER_TOLERANCE    = 0.3  # relative power difference between a car here and an EVCC loadpoint
 SOCKET_IDLE_W           = 50   # W a switched socket in EVCC may draw and still count as idle
+EV_FROZEN_CHARGING      = 7200 # s a car may report charging while its SoC doesn't move
 EVCC_SOC_TOLERANCE      = 2    # % – EVCC estimates the SoC between polls
 AWAY_CHARGE_MAX_AGE     = 900  # seconds a car's own 'charging' report counts away from its station
 SOC_RISE_MIN            = 2    # % the SoC must climb (in two steps or more) ...
@@ -877,6 +904,7 @@ _DE = {
     'Battery type': 'Akkutyp', 'Optimal range': 'Optimaler Bereich',
     'Time above {opt_max}%': 'Zeit über {opt_max} %',
     'Charge cycles': 'Ladezyklen', 'Last full charge': 'Letzte Vollladung',
+    'VRM data frozen': 'VRM-Daten eingefroren',
     'Last EV contact': 'Letzter Fahrzeugkontakt',
     'Bridge': 'Bridge', 'Online': 'Online', 'Last update': 'Letzte Aktualisierung',
     'Data age': 'Datenalter', 'Next poll': 'Nächste Abfrage', 'Uptime': 'Laufzeit',
@@ -1123,7 +1151,8 @@ def poll_vrm():
             bat      = _bat()
             opt_max  = _get_int('OPT_MAX', bat['opt_max'])
             vehicles = {}
-            owners   = _station_owners(by_instance, records)
+            frozen   = {inst: _frozen(inst, ev, now) for inst, ev in by_instance.items()}
+            owners   = _station_owners(by_instance, records, frozen)
 
             with _cfg_lock:
                 cfg = _load_cfg()
@@ -1309,6 +1338,7 @@ def poll_vrm():
                         'odometer':        odometer,
                         'name':            custom_name,
                         'raw':             {'ev': ev, 'evcs_device': evcs_name, 'evcs': evcs},
+                        'stale':           frozen.get(inst, False),
                     }
 
                     print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
@@ -1316,7 +1346,8 @@ def poll_vrm():
                           f' Connection:{_connection(ev) or "-"} AtSite:{ev.get("/AtSite", "-")}'
                           f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}'
                           f'{" (station owned by other EV)" if not_plugged else ""}'
-                          f'{" (charging away from station)" if away else ""}',
+                          f'{" (charging away from station)" if away else ""}'
+                          f'{" (VRM data frozen – served to EVCC as asleep)" if frozen.get(inst) else ""}',
                           flush=True)
 
                 _save_cfg(cfg)
@@ -1944,6 +1975,8 @@ def build_status_page():
             state     = data['charging_state']
             icon, state_label, state_color = CHARGING_STATE_UI.get(state, ('❓', state, '#6b7280'))
             state_label = _t(state_label)
+            if veh.get('stale'):
+                icon, state_label, state_color = '⚠️', _t('VRM data frozen'), '#f59e0b'
             bat_type, bat, opt_min, opt_max = _car_bat(vin, cfg)
             bar_color = _soc_color(soc, opt_min, opt_max)
 
@@ -2480,6 +2513,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             veh = _find_vehicle(vehicles, vin)
+            if veh.get('stale'):
+                # VRM no longer reaches the car: no old SoC or 'charging' for EVCC. The
+                # tesla-ble template turns this reason into ErrAsleep – no SoC update, and
+                # EVCC's vehicle detection skips the car.
+                self._json({'response': {'result': False, 'reason': 'vehicle is sleeping'}},
+                           headers={'X-Data-Age-Seconds': str(age), 'X-Vehicle-Data': 'frozen'})
+                return
 
             # EVCC's tesla-ble template also reads climate_state.is_preconditioning (climater).
             # VRM has no climate data; without the field EVCC logs "ParseBool: parsing <nil>".
