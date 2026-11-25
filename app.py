@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.6"
+VERSION    = "2.21.0"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -816,6 +816,7 @@ _cache = {
     'station_owner': {},  # EVCS instance -> EV instance plugged into it (sticky, see _station_owners)
     'soc_since': {},      # EV instance -> (SoC, time it took that value while charging) – see _frozen
     'frozen': {},         # EV instance -> VRM data stand still (see _frozen)
+    'ble_last': {},       # VIN -> last VRM-shaped values read over BLE (see _ble_records)
     'fix_pending': {},    # loadpoint -> (planned fix, time first seen) – a fix must hold before it is made    # EV instance -> [(time a SoC value first showed up, SoC)] while not charging
     'evcc_live': (0.0, {}),   # (time, {'solar': {evcc vehicle: %}, 'limit': {evcc vehicle: %}, 'titles': {evcc vehicle: title}})
     'full_charge_ts': 0.0,  # time of the last periodic-full-charge evaluation
@@ -1110,39 +1111,134 @@ def _stale_after():
     return max(1800, 10 * _interval())
 
 def _is_configured():
-    """Return True if both VRM_TOKEN and VRM_SITE_ID are set."""
+    """True if a data source is set up: Tesla BLE (BLE_URL + BLE_VINS) or VRM (token + site)."""
+    if _ble_mode():
+        return bool(_get('BLE_URL')) and bool(_ble_vins())
     return bool(_get('VRM_TOKEN')) and bool(_get('VRM_SITE_ID'))
 
 
+# ── Tesla BLE source (TeslaBleHttpProxy) ───────────────────────────────────────
+# VRM charges for vehicle data since 11/2026 and lost the cars for hours (25.11.). With
+# DATA_SOURCE=ble the cars are read over Bluetooth by a TeslaBleHttpProxy near them. Its
+# charge_state is turned into the VRM paths this proxy already works with, so the full
+# charge, the history and the status page stay as they are. Reading never wakes a car.
+BLE_CHARGING_CODE = {'Charging': 3, 'Starting': 3, 'Calibrating': 3, 'Complete': 244,
+                     'Stopped': 250, 'NoPower': 250, 'Disconnected': 0}
+BLE_TIMEOUT = 45   # s – the BLE proxy scans for a while before it gives up on a car
+
+def _ble_mode():
+    return str(_get('DATA_SOURCE', 'vrm')).strip().lower() == 'ble'
+
+def _ble_vins():
+    return [v.strip().upper() for v in str(_get('BLE_VINS', '')).split(',') if v.strip()]
+
+def _ble_fetch(url, vin):
+    """({'charge_state': …, 'drive_state': …}, None) of one car, or (None, reason)."""
+    # Several endpoints are joined by ';' – encoded, a raw ';' makes Go drop the parameter
+    req = Request(f'{url}/api/1/vehicles/{vin}/vehicle_data?endpoints=charge_state%3Bdrive_state')
+    try:
+        with urlopen(req, timeout=BLE_TIMEOUT) as resp:
+            body = json.loads(resp.read())
+    except HTTPError as exc:   # 503 with the reason in the body when the car can't be read
+        try:
+            body = json.loads(exc.read())
+        except ValueError:
+            return None, f'HTTP {exc.code}'
+    outer = (body or {}).get('response') or {} if isinstance(body, dict) else {}
+    if not outer.get('result'):
+        return None, str(outer.get('reason') or 'no data')
+    return outer.get('response') or {}, None
+
+def _ble_records(now):
+    """The cars of BLE_VINS as VRM records {instance: {dbusPath: value}}.
+
+    Asleep: the last values stay (a sleeping car doesn't charge). Not in range: the car is
+    away (AtSite 0). Another error keeps the last values as they are. A car never read yet
+    is left out rather than shown with 0 %."""
+    url = str(_get('BLE_URL')).rstrip('/')
+    by_instance = {}
+    for inst, vin in enumerate(_ble_vins()):
+        data, reason = _ble_fetch(url, vin)
+        with _lock:
+            last = dict(_cache['ble_last'].get(vin) or {})
+        if data:
+            cs = data.get('charge_state') or {}
+            ds = data.get('drive_state') or {}
+            ev = {'/VIN': vin, '/AtSite': 1, '/LastUpdated/EvContact': now,
+                  '/Soc': cs.get('battery_level'),
+                  '/RangeToGo': _num(cs.get('battery_range'), 0) * 1.60934,
+                  '/TargetSoc': cs.get('charge_limit_soc'),
+                  '/ChargingState': BLE_CHARGING_CODE.get(cs.get('charging_state'), 0),
+                  '/Ac/Power': _num(cs.get('charger_power'), 0) * 1000,
+                  '/Ac/Voltage': cs.get('charger_voltage'),
+                  '/Ac/Current': cs.get('charger_actual_current'),
+                  '/Ac/NumberOfPhases': cs.get('charger_phases'),
+                  '/Ac/MaxChargeCurrent': cs.get('charge_current_request_max')}
+            if vin[3:4] in ('S', '3', 'X', 'Y'):
+                ev['/CustomName'] = f'Model {vin[3]}'
+            if ds.get('odometer') is not None:
+                ev['/Odometer'] = _num(ds.get('odometer'), 0) * 1.60934
+            elif last.get('/Odometer') is not None:
+                ev['/Odometer'] = last['/Odometer']
+            ev = {k: v for k, v in ev.items() if v is not None}
+            with _lock:
+                _cache['ble_last'][vin] = ev
+        elif not last:
+            print(f'[BLE] {vin}: no data yet ({reason})', flush=True)
+            continue
+        elif 'sleeping' in reason.lower():
+            ev = dict(last, **{'/AtSite': 1, '/Ac/Power': 0})
+            if ev.get('/ChargingState') == 3:
+                ev['/ChargingState'] = 250
+        elif 'not in range' in reason.lower():
+            ev = dict(last, **{'/AtSite': 0, '/ChargingState': 0, '/Ac/Power': 0})
+        else:
+            print(f'[BLE] {vin}: {reason} – keeping the last values', flush=True)
+            ev = last
+        by_instance[inst] = ev
+    if not by_instance:
+        raise ValueError('No car could be read over BLE yet – BLE_URL, BLE_VINS and the key in the car?')
+    return by_instance
+
+
 # ── VRM Poller ─────────────────────────────────────────────────────────────────
+def _vrm_records():
+    """All VRM diagnostics records and the EV records grouped by instance."""
+    token   = _get('VRM_TOKEN')
+    site_id = _get('VRM_SITE_ID')
+    if not token or not site_id:
+        raise ValueError('VRM_TOKEN and VRM_SITE_ID are not configured')
+
+    url = (f'https://vrmapi.victronenergy.com/v2/installations'
+           f'/{site_id}/diagnostics?count=1000')
+    req = Request(url, headers={'X-Authorization': f'Token {token}'})
+    with urlopen(req, timeout=30) as resp:
+        records = json.loads(resp.read())['records']
+
+    ev_records = [r for r in records
+                  if r.get('Device') == 'Electric Vehicle' and r.get('dbusPath')]
+
+    if not ev_records:
+        raise ValueError('No EV device found in VRM – is the vehicle set up in VRM?')
+
+    # Group records by instance to support multiple EVs
+    by_instance = {}
+    for r in ev_records:
+        inst = r.get('instance', 0)
+        if inst not in by_instance:
+            by_instance[inst] = {}
+        by_instance[inst][r['dbusPath']] = r['rawValue']
+    return records, by_instance
+
 def poll_vrm():
     last_poll = 0.0
     while True:
         try:
-            token   = _get('VRM_TOKEN')
-            site_id = _get('VRM_SITE_ID')
-            if not token or not site_id:
-                raise ValueError('VRM_TOKEN and VRM_SITE_ID are not configured')
-
-            url = (f'https://vrmapi.victronenergy.com/v2/installations'
-                   f'/{site_id}/diagnostics?count=1000')
-            req = Request(url, headers={'X-Authorization': f'Token {token}'})
-            with urlopen(req, timeout=30) as resp:
-                records = json.loads(resp.read())['records']
-
-            ev_records = [r for r in records
-                          if r.get('Device') == 'Electric Vehicle' and r.get('dbusPath')]
-
-            if not ev_records:
-                raise ValueError('No EV device found in VRM – is the vehicle set up in VRM?')
-
-            # Group records by instance to support multiple EVs
-            by_instance = {}
-            for r in ev_records:
-                inst = r.get('instance', 0)
-                if inst not in by_instance:
-                    by_instance[inst] = {}
-                by_instance[inst][r['dbusPath']] = r['rawValue']
+            if _ble_mode():
+                records     = []   # no Victron station data: station logic stays out
+                by_instance = _ble_records(time.time())
+            else:
+                records, by_instance = _vrm_records()
 
             now      = time.time()
             elapsed  = min(now - last_poll, 2 * _interval()) if last_poll else 0
@@ -1341,7 +1437,7 @@ def poll_vrm():
                         'stale':           frozen.get(inst, False),
                     }
 
-                    print(f'[VRM] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
+                    print(f'[{"BLE" if _ble_mode() else "VRM"}] OK – VIN={vin}  SoC={soc}%  Range={range_km}km  '
                           f'State={charging_state}  Power={power_w}W  raw=ChargingState:{charging_raw}'
                           f' Connection:{_connection(ev) or "-"} AtSite:{ev.get("/AtSite", "-")}'
                           f' EVCS:{evcs_name or "-"}/Status:{evcs_status if evcs_status is not None else "-"}'
