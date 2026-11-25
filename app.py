@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import urlopen, Request
 
-VERSION    = "2.20.4"
+VERSION    = "2.20.5"
 APP_NAME   = "vrm-ev-proxy"
 CONFIG_FILE = '/config/settings.json'
 
@@ -144,17 +144,28 @@ def _match_vin(point, vehicles):
                 if abs(vehicles[vin]['data']['battery_level'] - soc) <= EVCC_SOC_TOLERANCE]
     return hits[0] if len(hits) == 1 else None
 
+def _station_guess(veh):
+    """The car charges only by the station's word: it was picked as the car plugged into
+    the shared station and got the station's status and power, but the car itself does
+    not report charging. VRM gives no way to tell which car is plugged in, so that pick
+    is a guess – 24.11.: the unplugged Model Y (ChargingState 0) got the 4.9 kW the
+    Model 3 drew at the station, and this proxy put the Model Y on the wallbox in evcc."""
+    return (veh['raw']['evcs_device'] is not None
+            and int(_num(veh['raw']['ev'].get('/ChargingState'), 0)) != 3)
+
 def _evs_charging_here(point, vehicles):
     """VINs of the cars of this proxy that charge with about the power of this loadpoint.
 
     Ties a fix of the vehicle on a loadpoint to the car really charging there: with two
     loadpoints charging at once (wallbox 11 kW, Schuko 2.3 kW) the car at the wallbox
     must not make EVCC re-identify the Schuko loadpoint – EVCC would put that very car
-    there as well (16.10.).
+    there as well (16.10.). A car that charges only by the station's word doesn't count
+    (_station_guess): its power is the station's power, matching it proves nothing.
     """
     lp_w = _num(point.get('chargePower'), 0)
     return [vin for vin, v in vehicles.items()
             if v['data']['charging_state'] == 'Charging' and v['power_w'] > 0
+            and not _station_guess(v)
             and abs(v['power_w'] - lp_w) <= EVCC_POWER_TOLERANCE * max(lp_w, 1)]
 
 def _plugged_at_station(veh):
@@ -163,9 +174,22 @@ def _plugged_at_station(veh):
     return veh['raw']['evcs_device'] is not None and status is not None and int(_num(status, 0)) != 0
 
 def _charging_at_station(veh):
-    """The car charges at the Victron station right now – the station delivers power to it."""
+    """The car charges at the Victron station right now – the station delivers power to it
+    and the car itself reports charging."""
     return (_plugged_at_station(veh) and int(_num(veh['raw']['evcs'].get('/Status'), 0)) == 2
-            and veh['data']['charging_state'] == 'Charging')
+            and veh['data']['charging_state'] == 'Charging' and not _station_guess(veh))
+
+def _socket_points(points):
+    """(loadpoint number, loadpoint) of EVCC's switched sockets – heaters left out."""
+    return [(lp, p) for lp, p in enumerate(points, 1)
+            if p.get('chargerFeatureSwitchDevice') and not p.get('chargerFeatureHeating')]
+
+def _socket_charging(points):
+    """True if a switched socket in EVCC draws power, False if none does, None without sockets."""
+    sockets = _socket_points(points)
+    if not sockets:
+        return None
+    return any(_num(p.get('chargePower'), 0) > SOCKET_IDLE_W for _, p in sockets)
 
 def _on_real_charger(name, points):
     """EVCC shows this vehicle on a connected loadpoint that is a real charger (not a switched
@@ -229,7 +253,12 @@ def _station_car(point, vehicles, points):
     if not vin:
         return None
     shown = vehicles[vin]
-    elsewhere = shown['data']['charging_state'] == 'Charging' and not _charging_at_station(shown)
+    # At home a car charging elsewhere can only be on a switched socket. Without one
+    # drawing power the report is a leftover from before the car was moved to the
+    # station (24.11.: the Model 3 still reported 2.1 kW from the Schuko an hour after
+    # it had been moved to the wallbox).
+    elsewhere = (shown['data']['charging_state'] == 'Charging' and not _charging_at_station(shown)
+                 and _socket_charging(points) is not False)
     if not (elsewhere or _num(shown['raw']['ev'].get('/AtSite'), 1) == 0):
         return None
     at_station = [v for v, veh in vehicles.items() if v != vin and _plugged_at_station(veh)]
@@ -251,6 +280,38 @@ def _evcc_fix_vehicle(url, lp, vins, reason):
             print(f'[EVCC] Setting vehicle {name} on loadpoint {lp} failed ({reason}): {exc}', flush=True)
     _evcc_redetect(url, lp, reason)
 
+def _free_sockets(url, points, vehicles, now):
+    """Take the car off an idle switched socket while a real charger looks for its car.
+
+    A switched socket never reports 'unplugged', so EVCC keeps the car it once put there,
+    and EVCC's own detection skips every car that another loadpoint holds. A car moved
+    from the socket to the Victron station was therefore never found there (24.11.:
+    Model 3 from the Schuko to the wallbox at 14:28, EVCC found no car for 10 min, the
+    Schuko loadpoint kept the Model 3 until the next morning). A socket that draws no
+    power gives no evidence the car is still on it; once it charges again, the car
+    charging there is put back (_check_evcc_loadpoints, 'charging without a vehicle').
+    """
+    detecting = any(p.get('vehicleDetectionActive') and p.get('connected')
+                    and not p.get('chargerFeatureSwitchDevice') and not p.get('chargerFeatureHeating')
+                    for p in points)
+    if not detecting:
+        return
+    for lp, p in _socket_points(points):
+        if (not _lp_allowed(lp) or not p.get('vehicleName') or p.get('charging')
+                or _num(p.get('chargePower'), 0) > SOCKET_IDLE_W or not _match_vin(p, vehicles)):
+            continue
+        with _lock:
+            if now - _cache['evcc_redetect_ts'].get(lp, 0) < EVCC_REDETECT_COOLDOWN:
+                continue
+            _cache['evcc_redetect_ts'][lp] = now
+        try:
+            req = Request(f'{url}/api/loadpoints/{lp}/vehicle', method='DELETE')
+            with urlopen(req, timeout=10) as resp:
+                print(f'[EVCC] Vehicle {p.get("vehicleTitle")} removed from loadpoint {lp} '
+                      f'(idle switched socket while another charger looks for its car) – HTTP {resp.status}', flush=True)
+        except Exception as exc:
+            print(f'[EVCC] Removing the vehicle from loadpoint {lp} failed: {exc}', flush=True)
+
 def _check_evcc_loadpoints(vehicles):
     """Restart EVCC vehicle detection on loadpoints that show a car which isn't plugged in.
 
@@ -271,6 +332,7 @@ def _check_evcc_loadpoints(vehicles):
         return
     now = time.time()
     planned = set()
+    _free_sockets(url, state.get('loadpoints') or [], vehicles, now)
     for lp, point in enumerate(state.get('loadpoints') or [], 1):
         if not _lp_allowed(lp) or point.get('vehicleDetectionActive'):
             continue
@@ -737,6 +799,7 @@ _cache = {
 EVCC_REDETECT_COOLDOWN  = 300  # seconds between EVCC re-detections per loadpoint
 EVCC_RANGE_TOLERANCE_KM = 5    # EVCC shows the range of its last poll
 EVCC_POWER_TOLERANCE    = 0.3  # relative power difference between a car here and an EVCC loadpoint
+SOCKET_IDLE_W           = 50   # W a switched socket in EVCC may draw and still count as idle
 EVCC_SOC_TOLERANCE      = 2    # % – EVCC estimates the SoC between polls
 AWAY_CHARGE_MAX_AGE     = 900  # seconds a car's own 'charging' report counts away from its station
 SOC_RISE_MIN            = 2    # % the SoC must climb (in two steps or more) ...
